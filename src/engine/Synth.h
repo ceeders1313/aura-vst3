@@ -18,34 +18,37 @@ struct Params
     bool  oneShot = false;
 
     int   wave = 0;            // 0 Saw, 1 Square, 2 Wavetable, 3 FM
-    int   unison = 5;          // 1..7
+    int   unison = 5;
     float detune = 0.25f;
     float wtPos = 0.f;
 
-    int   fmAlgo = 0;          // 0 2-op, 1 3-op stack, 2 3-op parallel
+    int   fmAlgo = 0;
     float fmRatio1 = 2.f, fmRatio2 = 3.f, fmIndex = 2.f, fmFeedback = 0.f;
 
     float cutoff = 8000.f, res = 0.8f;
-    float atk = 0.005f, dec = 0.3f, sus = 0.7f, rel = 0.3f;     // enveloppe d'amplitude
-    float matk = 0.01f, mdec = 0.4f, msus = 0.f, mrel = 0.3f;   // enveloppe de modulation
+    float atk = 0.005f, dec = 0.3f, sus = 0.7f, rel = 0.3f;
+    float matk = 0.01f, mdec = 0.4f, msus = 0.f, mrel = 0.3f;
 
     float lfoRate[2] = { 2.f, 0.5f };
     int   lfoShape[2] = { 0, 0 };
-    float msegTime = 1.f;
-    bool  msegLoop = false;
+    float msegTime[2] = { 1.f, 1.f };
+    bool  msegLoop[2] = { false, false };
     float macro[4] = { 0.f, 0.f, 0.f, 0.f };
 
     ModSlot slots[kSlots];
 
-    float gain = 0.5f;
-    float modWheel = 0.f;      // renseigne par le Synth (MIDI)
-    float bend = 0.f;          // demi-tons
+    // zone de la couche
+    int keyLo = 0, keyHi = 127, velLo = 1, velHi = 127, transpose = 0;
+
+    float gain = 1.f;
+    float modWheel = 0.f;
+    float bend = 0.f;
 };
 
 struct RenderCtx
 {
     const WavetableBank* wt = nullptr;
-    const MsegShape* mseg = nullptr;
+    const MsegShape* mseg = nullptr;     // tableau de 2 formes
 };
 
 inline float polyBlep (float t, float dt)
@@ -134,7 +137,8 @@ class Voice
 {
 public:
     bool active = false, released = false;
-    int note = -1;
+    int note = -1;          // note sonore (apres transposition)
+    int trigNote = -1;      // note MIDI d'origine (pour le note-off)
     float vel = 0.f;
     uint64_t age = 0;
 
@@ -156,7 +160,6 @@ public:
         }
         if (p.wave == 3) phase[0] = phase[1] = phase[2] = 0.f;
         fbState = 0.f;
-
         pos = 0.0;
 
         rng = (0x9E3779B9u ^ uint32_t (a * 2654435761u) ^ uint32_t (n)) | 1u;
@@ -164,7 +167,7 @@ public:
         lfoPh[0] = lfoPh[1] = 0.f;
         lfoSH[0] = nextRnd();
         lfoSH[1] = nextRnd();
-        msegPos = 0.0;
+        msegPos[0] = msegPos[1] = 0.0;
 
         fl.reset(); fr.reset();
         env.reset();  env.noteOn();
@@ -179,6 +182,8 @@ public:
         env.noteOff();
         menv.noteOff();
     }
+
+    void kill() { active = false; bank = nullptr; zone = nullptr; }
 
     float level() const { return env.level; }
 
@@ -197,7 +202,7 @@ public:
 
 private:
     static constexpr int kOsc = 7;
-    static constexpr int kSub = 32;     // periode de controle de la modulation
+    static constexpr int kSub = 32;
 
     struct ModOut
     {
@@ -214,13 +219,17 @@ private:
     ModOut computeMod (const Params& p, const RenderCtx& ctx, float fs, int m)
     {
         float s[kNumSrc] = {};
-        s[SrcModEnv]  = mlev;
-        s[SrcLfo1]    = lfoValue (p.lfoShape[0], lfoPh[0], lfoSH[0]);
-        s[SrcLfo2]    = lfoValue (p.lfoShape[1], lfoPh[1], lfoSH[1]);
+        s[SrcModEnv] = mlev;
+        s[SrcLfo1]   = lfoValue (p.lfoShape[0], lfoPh[0], lfoSH[0]);
+        s[SrcLfo2]   = lfoValue (p.lfoShape[1], lfoPh[1], lfoSH[1]);
 
-        float t = float (msegPos / std::max (double (p.msegTime), 0.001));
-        if (p.msegLoop) t -= std::floor (t); else t = std::min (t, 1.f);
-        s[SrcMseg]    = (ctx.mseg != nullptr) ? ctx.mseg->eval (t) : 0.f;
+        for (int q = 0; q < 2; ++q)
+        {
+            float t = float (msegPos[q] / std::max (double (p.msegTime[q]), 0.001));
+            if (p.msegLoop[q]) t -= std::floor (t); else t = std::min (t, 1.f);
+            s[q == 0 ? SrcMseg : SrcMseg2] = (ctx.mseg != nullptr) ? ctx.mseg[q].eval (t) : 0.f;
+            msegPos[q] += double (m) / double (fs);
+        }
 
         s[SrcVelocity] = vel;
         s[SrcKey]      = juce::jlimit (-1.f, 1.f, float (note - 60) / 48.f);
@@ -233,13 +242,11 @@ private:
             if (sl.src > 0 && sl.src < kNumSrc && sl.dst > 0 && sl.dst < kNumDst && sl.amount != 0.f)
                 sum[sl.dst] += s[sl.src] * sl.amount;
 
-        // avance LFO et MSEG de m echantillons
         for (int k = 0; k < 2; ++k)
         {
             lfoPh[k] += p.lfoRate[k] * float (m) / fs;
             if (lfoPh[k] >= 1.f) { lfoPh[k] -= std::floor (lfoPh[k]); lfoSH[k] = nextRnd(); }
         }
-        msegPos += double (m) / double (fs);
 
         ModOut o;
         o.pitch  = sum[DstPitch] * 24.f + p.bend;
@@ -285,7 +292,7 @@ private:
         }
         const float norm = 0.87f / std::sqrt (float (u));
         const float framePos = mo.wt * float (WavetableBank::kFrames - 1);
-        const float fmK = mo.fmIdx * 0.15915f;     // indice en radians -> cycles
+        const float fmK = mo.fmIdx * 0.15915f;
 
         const float* dl = nullptr;
         const float* dr = nullptr;
@@ -422,7 +429,7 @@ private:
     Adsr env, menv;
     float mlev = 0.f;
     float lfoPh[2] {}, lfoSH[2] {};
-    double msegPos = 0.0;
+    double msegPos[2] { 0.0, 0.0 };
     uint32_t rng = 1;
     float rndVal = 0.f;
     Svf fl, fr;
@@ -433,13 +440,15 @@ class Synth
 public:
     static constexpr int kVoices = 64;
 
-    Synth() { ctx.mseg = &mseg; }
+    Synth() { ctx.mseg = mseg; }
 
     void prepare (double sampleRate)
     {
         fs = float (sampleRate);
-        for (auto& v : voices) v.active = false;
+        killAll();
     }
+
+    void killAll() { for (auto& v : voices) v.kill(); }
 
     void setParams (const Params& p)
     {
@@ -448,7 +457,7 @@ public:
         params.bend = bend;
     }
     void setBank (const SampleBank::Ptr& b) { bank = b; }
-    void setMseg (const MsegShape& s) { mseg = s; }
+    void setMseg (int idx, const MsegShape& s) { mseg[idx & 1] = s; }
     void setWavetables (const WavetableBank* w) { ctx.wt = w; }
 
     void process (float* L, float* R, int numSamples, const juce::MidiBuffer& midi)
@@ -464,7 +473,8 @@ public:
         renderVoices (L + pos, R + pos, numSamples - pos);
 
         const float g = params.gain;
-        for (int i = 0; i < numSamples; ++i) { L[i] *= g; R[i] *= g; }
+        if (g != 1.f)
+            for (int i = 0; i < numSamples; ++i) { L[i] *= g; R[i] *= g; }
     }
 
 private:
@@ -488,14 +498,19 @@ private:
 
     void noteOn (int note, float vel)
     {
+        const int vel127 = juce::jlimit (1, 127, int (vel * 127.f + 0.5f));
+        if (note < params.keyLo || note > params.keyHi) return;
+        if (vel127 < params.velLo || vel127 > params.velHi) return;
+
+        const int snote = juce::jlimit (0, 127, note + params.transpose);
+
         const Zone* zone = nullptr;
         if (params.source >= 1 && bank != nullptr)
         {
             const Zone* matches[16];
-            const int vel127 = juce::jlimit (1, 127, int (vel * 127.f + 0.5f));
-            const int c = bank->match (note, vel127, matches, 16);
+            const int c = bank->match (snote, vel127, matches, 16);
             if (c > 0)
-                zone = matches[rrCounter[size_t (note)]++ % uint32_t (c)];
+                zone = matches[rrCounter[size_t (snote)]++ % uint32_t (c)];
         }
         if (params.source == 1 && zone == nullptr) return;
 
@@ -513,13 +528,14 @@ private:
                 if (score > best) { best = score; target = &v; }
             }
         }
-        target->start (note, vel, ++counter, params, bank, zone);
+        target->start (snote, vel, ++counter, params, bank, zone);
+        target->trigNote = note;
     }
 
     void noteOff (int note)
     {
         for (auto& v : voices)
-            if (v.active && ! v.released && v.note == note) v.stop();
+            if (v.active && ! v.released && v.trigNote == note) v.stop();
     }
 
     void renderVoices (float* L, float* R, int n)
@@ -532,7 +548,7 @@ private:
     std::array<Voice, kVoices> voices;
     std::array<uint32_t, 128> rrCounter {};
     SampleBank::Ptr bank;
-    MsegShape mseg;
+    MsegShape mseg[2];
     RenderCtx ctx;
     Params params;
     float modWheel = 0.f, bend = 0.f;

@@ -4,12 +4,13 @@
 #include <memory>
 #include <vector>
 
-// Grille de potentiometres lies a des parametres
+using APVTS_ = juce::AudioProcessorValueTreeState;
+
 class KnobSet
 {
 public:
-    KnobSet (juce::Component& owner, juce::AudioProcessorValueTreeState& s) : parent (owner), apvts (s) {}
-    void add (const char* id, const char* text);
+    KnobSet (juce::Component& owner, APVTS_& s) : parent (owner), apvts (s) {}
+    void add (const juce::String& id, const juce::String& text);
     void layout (juce::Rectangle<int> area, int cols);
 
 private:
@@ -17,10 +18,10 @@ private:
     {
         juce::Slider slider;
         juce::Label label;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attach;
+        std::unique_ptr<APVTS_::SliderAttachment> attach;
     };
     juce::Component& parent;
-    juce::AudioProcessorValueTreeState& apvts;
+    APVTS_& apvts;
     std::vector<std::unique_ptr<Knob>> knobs;
 };
 
@@ -28,9 +29,9 @@ struct LabeledCombo
 {
     juce::Label label;
     juce::ComboBox box;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> attach;
+    std::unique_ptr<APVTS_::ComboBoxAttachment> attach;
 
-    void init (juce::Component& parent, juce::AudioProcessorValueTreeState& s, const char* id,
+    void init (juce::Component& parent, APVTS_& s, const juce::String& id,
                const juce::String& text, const juce::StringArray& items)
     {
         label.setText (text, juce::dontSendNotification);
@@ -38,7 +39,7 @@ struct LabeledCombo
         box.addItemList (items, 1);
         parent.addAndMakeVisible (label);
         parent.addAndMakeVisible (box);
-        attach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (s, id, box);
+        attach = std::make_unique<APVTS_::ComboBoxAttachment> (s, id, box);
     }
     void place (juce::Rectangle<int>& row, int labelW, int boxW)
     {
@@ -48,7 +49,19 @@ struct LabeledCombo
     }
 };
 
-// Editeur graphique du MSEG
+struct ToggleBox
+{
+    juce::ToggleButton button;
+    std::unique_ptr<APVTS_::ButtonAttachment> attach;
+
+    void init (juce::Component& parent, APVTS_& s, const juce::String& id, const juce::String& text)
+    {
+        button.setButtonText (text);
+        parent.addAndMakeVisible (button);
+        attach = std::make_unique<APVTS_::ButtonAttachment> (s, id, button);
+    }
+};
+
 class MsegEditor : public juce::Component
 {
 public:
@@ -77,7 +90,7 @@ private:
 class SoundPage : public juce::Component, private juce::Timer
 {
 public:
-    explicit SoundPage (AuraProcessor&);
+    SoundPage (AuraProcessor&, int layer);
     void resized() override;
     void loadFiles (const juce::Array<juce::File>& files);
 
@@ -85,19 +98,19 @@ private:
     void timerCallback() override;
 
     AuraProcessor& proc;
+    int layer;
     LabeledCombo source, wave, fmAlgo;
-    juce::ToggleButton oneShot { "One-shot" };
+    ToggleBox oneShot;
     juce::TextButton loadButton { "Load samples..." };
     juce::Label statusLabel;
     KnobSet knobs;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> oneShotAttach;
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
 class ModPage : public juce::Component
 {
 public:
-    explicit ModPage (AuraProcessor&);
+    ModPage (AuraProcessor&, int layer);
     void resized() override;
 
 private:
@@ -106,8 +119,8 @@ private:
         juce::Label num;
         juce::ComboBox src, dst;
         juce::Slider amt;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> aS, aD;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> aA;
+        std::unique_ptr<APVTS_::ComboBoxAttachment> aS, aD;
+        std::unique_ptr<APVTS_::SliderAttachment> aA;
     };
     std::vector<std::unique_ptr<Row>> rows;
     LabeledCombo lfo1Shape, lfo2Shape;
@@ -117,16 +130,91 @@ private:
 class MsegPage : public juce::Component
 {
 public:
-    explicit MsegPage (AuraProcessor&);
+    MsegPage (AuraProcessor&, int layer);
     void resized() override;
 
 private:
     AuraProcessor& proc;
-    MsegEditor editor;
+    int layer;
+    MsegEditor editor[2];
+    ToggleBox loop[2];
+    KnobSet knobsA, knobsB;
     juce::Label hint;
-    juce::ToggleButton loop { "Loop" };
+};
+
+class LayerPage : public juce::Component
+{
+public:
+    LayerPage (AuraProcessor&, int layer);
+    void resized() override;
+    void loadFiles (const juce::Array<juce::File>& f) { sound.loadFiles (f); }
+
+private:
+    ToggleBox enable;
+    SoundPage sound;
+    ModPage mod;
+    MsegPage mseg;
+    juce::TabbedComponent inner { juce::TabbedButtonBar::TabsAtTop };
+};
+
+class RoutingPage : public juce::Component
+{
+public:
+    explicit RoutingPage (AuraProcessor&);
+    void resized() override;
+
+private:
+    struct MiniKnob
+    {
+        juce::Slider s;
+        std::unique_ptr<APVTS_::SliderAttachment> a;
+    };
+    struct Row
+    {
+        juce::Label name;
+        ToggleBox en, arp;
+        std::vector<std::unique_ptr<MiniKnob>> knobs;
+    };
+    std::vector<std::unique_ptr<Row>> rows;
+    std::vector<std::unique_ptr<juce::Label>> headers;
+};
+
+class FxPage : public juce::Component
+{
+public:
+    explicit FxPage (AuraProcessor&);
+    void resized() override;
+
+private:
+    struct Group
+    {
+        juce::Label title;
+        KnobSet knobs;
+        Group (juce::Component& o, APVTS_& s, const char* text) : knobs (o, s)
+        {
+            title.setText (text, juce::dontSendNotification);
+            title.setFont (juce::FontOptions (16.f, juce::Font::bold));
+            title.setColour (juce::Label::textColourId, juce::Colour (0xff4fc3f7));
+            o.addAndMakeVisible (title);
+        }
+    };
+
+    Group sat, cho, dly, rev, lim, mst;
+    ToggleBox satOn, dlyPing, limOn;
+    LabeledCombo satMode;
+};
+
+class ArpPage : public juce::Component
+{
+public:
+    explicit ArpPage (AuraProcessor&);
+    void resized() override;
+
+private:
+    ToggleBox on, latch;
+    LabeledCombo mode, rate;
     KnobSet knobs;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach;
+    juce::Label hint;
 };
 
 class AuraEditor : public juce::AudioProcessorEditor,
@@ -142,8 +230,9 @@ public:
 
 private:
     AuraProcessor& proc;
-    SoundPage sound;
-    ModPage mod;
-    MsegPage mseg;
-    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
+    std::vector<std::unique_ptr<LayerPage>> layerPages;
+    RoutingPage routing;
+    FxPage fx;
+    ArpPage arpPage;
+    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };   // en dernier : detruit en premier
 };

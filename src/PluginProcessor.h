@@ -1,6 +1,12 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <array>
+#include <atomic>
+#include <vector>
 #include "engine/Synth.h"
+#include "engine/LayerParams.h"
+#include "engine/Arp.h"
+#include "fx/Effects.h"
 
 class AuraProcessor : public juce::AudioProcessor
 {
@@ -20,7 +26,7 @@ public:
     bool acceptsMidi() const override  { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 2.0; }
+    double getTailLengthSeconds() const override { return 6.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -32,31 +38,63 @@ public:
     void setStateInformation (const void*, int) override;
 
     // Thread message uniquement
-    void loadSamples (const juce::Array<juce::File>& files);
-    juce::String getStatusText() const;
-    aura::MsegShape getMseg() const;
-    void setMseg (const aura::MsegShape& s);
+    void loadSamples (int layer, const juce::Array<juce::File>& files);
+    juce::String getStatusText (int layer) const;
+    aura::MsegShape getMseg (int layer, int idx) const;
+    void setMseg (int layer, int idx, const aura::MsegShape& s);
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     juce::AudioProcessorValueTreeState apvts;
 
 private:
-    void setStatus (const juce::String& s);
+    struct LayerRt
+    {
+        aura::Synth synth;
+
+        juce::SpinLock bankLock;
+        aura::SampleBank::Ptr pendingBank;
+        bool bankDirty = false;
+        std::vector<aura::SampleBank::Ptr> keepAlive;
+
+        mutable juce::SpinLock msegLock;
+        aura::MsegShape mseg[2];
+        bool msegDirty[2] { false, false };
+
+        mutable juce::CriticalSection statusLock;
+        juce::String status { "No samples loaded" };
+
+        bool wasOn = false;
+    };
+
+    void setStatus (int layer, const juce::String& s);
+    void fillParams (int layer, aura::Params& p) const;
+
+    struct GlobalPtrs
+    {
+        std::atomic<float> *satOn, *satMode, *satDrive, *satMix,
+                           *choRate, *choDepth, *choRet,
+                           *dlyTime, *dlyFb, *dlyDamp, *dlyPing, *dlyRet,
+                           *revDecay, *revSize, *revDamp, *revPre, *revRet,
+                           *limOn, *limCeil, *limRel, *master,
+                           *arpOn, *arpMode, *arpRate, *arpOct, *arpGate, *arpSwing, *arpLatch;
+    } gp {};
+
+    std::atomic<float>* lpPtr[aura::kLayers][aura::kNumLP] {};
 
     aura::WavetableBank wavetables;
-    aura::Synth synth;
+    std::array<LayerRt, aura::kLayers> layers;
 
-    juce::SpinLock bankLock;
-    aura::SampleBank::Ptr pendingBank;
-    bool bankDirty = false;
-    std::vector<aura::SampleBank::Ptr> keepAlive;
+    aura::Arp arp;
+    juce::MidiBuffer arpMidi;
 
-    mutable juce::SpinLock msegLock;
-    aura::MsegShape msegShape;
-    bool msegDirty = false;
+    aura::fx::Saturator saturator;
+    aura::fx::Chorus chorus;
+    aura::fx::StereoDelay delayFx;
+    aura::fx::FdnReverb reverb;
+    aura::fx::Limiter limiter;
 
-    mutable juce::CriticalSection statusLock;
-    juce::String statusText { "No samples loaded" };
+    int bufCap = 0;
+    juce::AudioBuffer<float> layerBuf, dryBus, choBus, dlyBus, revBus, fxOut;
 
     juce::ThreadPool loaderPool { 1 };   // declare en dernier : detruit en premier
 

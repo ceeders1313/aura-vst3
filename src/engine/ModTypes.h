@@ -7,13 +7,13 @@ namespace aura
 {
 constexpr int kSlots = 8;
 
-enum Src { SrcNone = 0, SrcModEnv, SrcLfo1, SrcLfo2, SrcMseg, SrcVelocity, SrcKey,
+enum Src { SrcNone = 0, SrcModEnv, SrcLfo1, SrcLfo2, SrcMseg, SrcMseg2, SrcVelocity, SrcKey,
            SrcModWheel, SrcRandom, SrcMacro1, SrcMacro2, SrcMacro3, SrcMacro4, kNumSrc };
 
 enum Dst { DstNone = 0, DstPitch, DstCutoff, DstRes, DstWtPos, DstFmIndex, DstDetune, DstLevel, kNumDst };
 
 inline const char* const kSrcNames[kNumSrc] = {
-    "None", "Mod Env", "LFO 1", "LFO 2", "MSEG", "Velocity", "Key",
+    "None", "Mod Env", "LFO 1", "LFO 2", "MSEG 1", "MSEG 2", "Velocity", "Key",
     "Mod Wheel", "Random", "Macro 1", "Macro 2", "Macro 3", "Macro 4" };
 
 inline const char* const kDstNames[kNumDst] = {

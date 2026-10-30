@@ -1,9 +1,12 @@
 #include "PluginEditor.h"
 
+using namespace aura;
+
 static const juce::Colour kAccent (0xff4fc3f7);
+static const juce::Colour kPanel (0xff1b1e26);
 
 // ---------------- KnobSet ----------------
-void KnobSet::add (const char* id, const char* text)
+void KnobSet::add (const juce::String& id, const juce::String& text)
 {
     auto k = std::make_unique<Knob>();
     k->slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -12,7 +15,7 @@ void KnobSet::add (const char* id, const char* text)
     k->label.setJustificationType (juce::Justification::centred);
     parent.addAndMakeVisible (k->slider);
     parent.addAndMakeVisible (k->label);
-    k->attach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (apvts, id, k->slider);
+    k->attach = std::make_unique<APVTS_::SliderAttachment> (apvts, id, k->slider);
     knobs.push_back (std::move (k));
 }
 
@@ -150,7 +153,7 @@ void MsegEditor::mouseDrag (const juce::MouseEvent& e)
 void MsegEditor::mouseDoubleClick (const juce::MouseEvent& e)
 {
     const int hp = hitPoint (e.position);
-    if (hp > 0 && hp < shape.n - 1)               // supprime un point interieur
+    if (hp > 0 && hp < shape.n - 1)
     {
         for (int i = hp; i < shape.n - 1; ++i)
         {
@@ -163,7 +166,7 @@ void MsegEditor::mouseDoubleClick (const juce::MouseEvent& e)
         notify();
         return;
     }
-    if (hp >= 0 || shape.n >= aura::MsegShape::kMax) return;
+    if (hp >= 0 || shape.n >= MsegShape::kMax) return;
 
     float x, y;
     fromPx (e.position, x, y);
@@ -171,7 +174,7 @@ void MsegEditor::mouseDoubleClick (const juce::MouseEvent& e)
     y = juce::jlimit (0.f, 1.f, y);
 
     int ins = 1;
-    while (ins < shape.n && shape.x[ins] < x) ++ins;    // x[ins-1] < x <= x[ins]
+    while (ins < shape.n && shape.x[ins] < x) ++ins;
     for (int i = shape.n; i > ins; --i)
     {
         shape.x[i] = shape.x[i - 1];
@@ -187,14 +190,14 @@ void MsegEditor::mouseDoubleClick (const juce::MouseEvent& e)
 }
 
 // ---------------- SoundPage ----------------
-SoundPage::SoundPage (AuraProcessor& p) : proc (p), knobs (*this, p.apvts)
+SoundPage::SoundPage (AuraProcessor& p, int layerIndex)
+    : proc (p), layer (layerIndex), knobs (*this, p.apvts)
 {
-    source.init (*this, p.apvts, "source", "Source", { "Synth", "Sample", "Synth+Sample" });
-    wave.init   (*this, p.apvts, "wave", "Waveform", { "Saw", "Square", "Wavetable", "FM" });
-    fmAlgo.init (*this, p.apvts, "fmalgo", "FM Algo", { "2-Op", "3-Op Stack", "3-Op Parallel" });
-
-    addAndMakeVisible (oneShot);
-    oneShotAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (p.apvts, "oneshot", oneShot);
+    auto& s = p.apvts;
+    source.init (*this, s, lpId (layer, LP_Source), "Source", { "Synth", "Sample", "Synth+Sample" });
+    wave.init   (*this, s, lpId (layer, LP_Wave), "Waveform", { "Saw", "Square", "Wavetable", "FM" });
+    fmAlgo.init (*this, s, lpId (layer, LP_FmAlgo), "FM Algo", { "2-Op", "3-Op Stack", "3-Op Parallel" });
+    oneShot.init (*this, s, lpId (layer, LP_OneShot), "One-shot");
 
     addAndMakeVisible (loadButton);
     loadButton.onClick = [this]
@@ -214,37 +217,37 @@ SoundPage::SoundPage (AuraProcessor& p) : proc (p), knobs (*this, p.apvts)
                               });
     };
 
-    statusLabel.setText (proc.getStatusText(), juce::dontSendNotification);
+    statusLabel.setText (proc.getStatusText (layer), juce::dontSendNotification);
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     addAndMakeVisible (statusLabel);
 
-    knobs.add ("unison", "Unison");
-    knobs.add ("detune", "Detune");
-    knobs.add ("wtpos",  "WT Position");
-    knobs.add ("gain",   "Gain");
-    knobs.add ("cutoff", "Cutoff");
-    knobs.add ("res",    "Resonance");
-    knobs.add ("fmr1",   "FM Ratio 1");
-    knobs.add ("fmr2",   "FM Ratio 2");
-    knobs.add ("fmidx",  "FM Index");
-    knobs.add ("fmfb",   "FM Feedback");
-    knobs.add ("atk",    "Attack");
-    knobs.add ("dec",    "Decay");
-    knobs.add ("sus",    "Sustain");
-    knobs.add ("rel",    "Release");
+    knobs.add (lpId (layer, LP_Unison), "Unison");
+    knobs.add (lpId (layer, LP_Detune), "Detune");
+    knobs.add (lpId (layer, LP_WtPos),  "WT Position");
+    knobs.add (lpId (layer, LP_Level),  "Level");
+    knobs.add (lpId (layer, LP_Cutoff), "Cutoff");
+    knobs.add (lpId (layer, LP_Res),    "Resonance");
+    knobs.add (lpId (layer, LP_FmR1),   "FM Ratio 1");
+    knobs.add (lpId (layer, LP_FmR2),   "FM Ratio 2");
+    knobs.add (lpId (layer, LP_FmIdx),  "FM Index");
+    knobs.add (lpId (layer, LP_FmFb),   "FM Feedback");
+    knobs.add (lpId (layer, LP_Atk),    "Attack");
+    knobs.add (lpId (layer, LP_Dec),    "Decay");
+    knobs.add (lpId (layer, LP_Sus),    "Sustain");
+    knobs.add (lpId (layer, LP_Rel),    "Release");
 
     startTimerHz (4);
 }
 
 void SoundPage::loadFiles (const juce::Array<juce::File>& files)
 {
-    proc.loadSamples (files);
+    proc.loadSamples (layer, files);
     source.box.setSelectedId (2);
 }
 
 void SoundPage::timerCallback()
 {
-    statusLabel.setText (proc.getStatusText(), juce::dontSendNotification);
+    statusLabel.setText (proc.getStatusText (layer), juce::dontSendNotification);
 }
 
 void SoundPage::resized()
@@ -259,7 +262,7 @@ void SoundPage::resized()
     auto r2 = a.removeFromTop (28);
     loadButton.setBounds (r2.removeFromLeft (140));
     r2.removeFromLeft (10);
-    oneShot.setBounds (r2.removeFromLeft (100));
+    oneShot.button.setBounds (r2.removeFromLeft (100));
     r2.removeFromLeft (10);
     statusLabel.setBounds (r2);
 
@@ -268,12 +271,12 @@ void SoundPage::resized()
 }
 
 // ---------------- ModPage ----------------
-ModPage::ModPage (AuraProcessor& p) : knobs (*this, p.apvts)
+ModPage::ModPage (AuraProcessor& p, int layer) : knobs (*this, p.apvts)
 {
-    const auto srcItems = aura::namesToArray (aura::kSrcNames, aura::kNumSrc);
-    const auto dstItems = aura::namesToArray (aura::kDstNames, aura::kNumDst);
+    const auto srcItems = namesToArray (kSrcNames, kNumSrc);
+    const auto dstItems = namesToArray (kDstNames, kNumDst);
 
-    for (int i = 0; i < aura::kSlots; ++i)
+    for (int i = 0; i < kSlots; ++i)
     {
         auto r = std::make_unique<Row>();
         r->num.setText (juce::String (i + 1), juce::dontSendNotification);
@@ -286,26 +289,26 @@ ModPage::ModPage (AuraProcessor& p) : knobs (*this, p.apvts)
         addAndMakeVisible (r->src);
         addAndMakeVisible (r->dst);
         addAndMakeVisible (r->amt);
-        r->aS = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (p.apvts, aura::kSlotSrcId[i], r->src);
-        r->aD = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (p.apvts, aura::kSlotDstId[i], r->dst);
-        r->aA = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (p.apvts, aura::kSlotAmtId[i], r->amt);
+        r->aS = std::make_unique<APVTS_::ComboBoxAttachment> (p.apvts, lpId (layer, lpSlot (i, 0)), r->src);
+        r->aD = std::make_unique<APVTS_::ComboBoxAttachment> (p.apvts, lpId (layer, lpSlot (i, 1)), r->dst);
+        r->aA = std::make_unique<APVTS_::SliderAttachment> (p.apvts, lpId (layer, lpSlot (i, 2)), r->amt);
         rows.push_back (std::move (r));
     }
 
     const juce::StringArray shapes { "Sine", "Triangle", "Saw", "Square", "S&H" };
-    lfo1Shape.init (*this, p.apvts, "lfo1shape", "LFO 1", shapes);
-    lfo2Shape.init (*this, p.apvts, "lfo2shape", "LFO 2", shapes);
+    lfo1Shape.init (*this, p.apvts, lpId (layer, LP_Lfo1Shape), "LFO 1", shapes);
+    lfo2Shape.init (*this, p.apvts, lpId (layer, LP_Lfo2Shape), "LFO 2", shapes);
 
-    knobs.add ("lfo1rate", "LFO1 Rate");
-    knobs.add ("lfo2rate", "LFO2 Rate");
-    knobs.add ("matk", "Env Attack");
-    knobs.add ("mdec", "Env Decay");
-    knobs.add ("msus", "Env Sustain");
-    knobs.add ("mrel", "Env Release");
-    knobs.add ("macro1", "Macro 1");
-    knobs.add ("macro2", "Macro 2");
-    knobs.add ("macro3", "Macro 3");
-    knobs.add ("macro4", "Macro 4");
+    knobs.add (lpId (layer, LP_Lfo1Rate), "LFO1 Rate");
+    knobs.add (lpId (layer, LP_Lfo2Rate), "LFO2 Rate");
+    knobs.add (lpId (layer, LP_MAtk), "Env Attack");
+    knobs.add (lpId (layer, LP_MDec), "Env Decay");
+    knobs.add (lpId (layer, LP_MSus), "Env Sustain");
+    knobs.add (lpId (layer, LP_MRel), "Env Release");
+    knobs.add (lpId (layer, LP_Macro1), "Macro 1");
+    knobs.add (lpId (layer, LP_Macro2), "Macro 2");
+    knobs.add (lpId (layer, LP_Macro3), "Macro 3");
+    knobs.add (lpId (layer, LP_Macro4), "Macro 4");
 }
 
 void ModPage::resized()
@@ -330,46 +333,253 @@ void ModPage::resized()
     knobs.layout (a, 5);
 }
 
-// ---------------- MsegPage ----------------
-MsegPage::MsegPage (AuraProcessor& p) : proc (p), knobs (*this, p.apvts)
+// ---------------- MsegPage (2 MSEG) ----------------
+MsegPage::MsegPage (AuraProcessor& p, int layerIndex)
+    : proc (p), layer (layerIndex), knobsA (*this, p.apvts), knobsB (*this, p.apvts)
 {
-    addAndMakeVisible (editor);
-    editor.setShape (proc.getMseg());
-    editor.onChange = [this] (const aura::MsegShape& s) { proc.setMseg (s); };
+    for (int k = 0; k < 2; ++k)
+    {
+        addAndMakeVisible (editor[k]);
+        editor[k].setShape (proc.getMseg (layer, k));
+        editor[k].onChange = [this, k] (const MsegShape& s) { proc.setMseg (layer, k, s); };
+    }
+    loop[0].init (*this, p.apvts, lpId (layer, LP_Mseg1Loop), "Loop");
+    loop[1].init (*this, p.apvts, lpId (layer, LP_Mseg2Loop), "Loop");
+    knobsA.add (lpId (layer, LP_Mseg1Time), "MSEG 1 Time");
+    knobsB.add (lpId (layer, LP_Mseg2Time), "MSEG 2 Time");
 
-    hint.setText ("Double-click: add / delete point   |   Drag orange diamond: curve   |   "
-                  "Use MSEG as a source in the Mod tab", juce::dontSendNotification);
+    hint.setText ("Double-click: add / delete point  |  Drag orange diamond: curve  |  "
+                  "Assign MSEG 1 / MSEG 2 as sources in the Mod tab", juce::dontSendNotification);
     hint.setColour (juce::Label::textColourId, juce::Colours::grey);
     addAndMakeVisible (hint);
-
-    addAndMakeVisible (loop);
-    loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (p.apvts, "msegloop", loop);
-    knobs.add ("msegtime", "Time (s)");
 }
 
 void MsegPage::resized()
 {
     auto a = getLocalBounds().reduced (8);
-    auto bottom = a.removeFromBottom (110);
     hint.setBounds (a.removeFromBottom (22));
-    editor.setBounds (a);
+    const int h = a.getHeight() / 2;
+    for (int k = 0; k < 2; ++k)
+    {
+        auto half = (k == 0) ? a.removeFromTop (h) : a;
+        auto side = half.removeFromRight (130);
+        editor[k].setBounds (half.reduced (0, 2));
+        loop[k].button.setBounds (side.removeFromBottom (28));
+        (k == 0 ? knobsA : knobsB).layout (side, 1);
+    }
+}
 
-    loop.setBounds (bottom.removeFromLeft (80).withSizeKeepingCentre (70, 28));
-    knobs.layout (bottom.removeFromLeft (140), 1);
+// ---------------- LayerPage ----------------
+LayerPage::LayerPage (AuraProcessor& p, int layer)
+    : sound (p, layer), mod (p, layer), mseg (p, layer)
+{
+    enable.init (*this, p.apvts, lpId (layer, LP_Enable), "Layer " + juce::String (layer + 1) + " enabled");
+    inner.addTab ("Sound", kPanel, &sound, false);
+    inner.addTab ("Mod",   kPanel, &mod, false);
+    inner.addTab ("MSEG",  kPanel, &mseg, false);
+    addAndMakeVisible (inner);
+}
+
+void LayerPage::resized()
+{
+    auto a = getLocalBounds().reduced (4);
+    enable.button.setBounds (a.removeFromTop (26).removeFromLeft (200));
+    inner.setBounds (a);
+}
+
+// ---------------- RoutingPage ----------------
+RoutingPage::RoutingPage (AuraProcessor& p)
+{
+    struct Col { int lp; const char* text; };
+    static const Col cols[] = {
+        { LP_KeyLo, "Key Lo" }, { LP_KeyHi, "Key Hi" }, { LP_VelLo, "Vel Lo" }, { LP_VelHi, "Vel Hi" },
+        { LP_Transpose, "Transpose" }, { LP_Level, "Level" }, { LP_Pan, "Pan" },
+        { LP_SendCho, "Chorus" }, { LP_SendDly, "Delay" }, { LP_SendRev, "Reverb" } };
+
+    auto addHeader = [this] (const char* t)
+    {
+        auto l = std::make_unique<juce::Label>();
+        l->setText (t, juce::dontSendNotification);
+        l->setJustificationType (juce::Justification::centred);
+        l->setColour (juce::Label::textColourId, kAccent);
+        addAndMakeVisible (*l);
+        headers.push_back (std::move (l));
+    };
+    addHeader ("Layer");
+    addHeader ("On");
+    for (const auto& c : cols) addHeader (c.text);
+    addHeader ("Arp");
+
+    for (int l = 0; l < kLayers; ++l)
+    {
+        auto r = std::make_unique<Row>();
+        r->name.setText ("Layer " + juce::String (l + 1), juce::dontSendNotification);
+        addAndMakeVisible (r->name);
+        r->en.init (*this, p.apvts, lpId (l, LP_Enable), "");
+        r->arp.init (*this, p.apvts, lpId (l, LP_Arp), "");
+        for (const auto& c : cols)
+        {
+            auto k = std::make_unique<MiniKnob>();
+            k->s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+            k->s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 52, 16);
+            addAndMakeVisible (k->s);
+            k->a = std::make_unique<APVTS_::SliderAttachment> (p.apvts, lpId (l, c.lp), k->s);
+            r->knobs.push_back (std::move (k));
+        }
+        rows.push_back (std::move (r));
+    }
+}
+
+void RoutingPage::resized()
+{
+    auto a = getLocalBounds().reduced (8);
+    const int nameW = 64, onW = 40, arpW = 40;
+    const int nk = rows.empty() ? 10 : (int) rows[0]->knobs.size();
+    const int kw = (a.getWidth() - nameW - onW - arpW) / std::max (1, nk);
+
+    auto hdr = a.removeFromTop (22);
+    {
+        size_t hi = 0;
+        headers[hi++]->setBounds (hdr.removeFromLeft (nameW));
+        headers[hi++]->setBounds (hdr.removeFromLeft (onW));
+        for (int k = 0; k < nk; ++k) headers[hi++]->setBounds (hdr.removeFromLeft (kw));
+        headers[hi++]->setBounds (hdr.removeFromLeft (arpW));
+    }
+
+    const int rowH = std::min (100, a.getHeight() / std::max (1, (int) rows.size()));
+    for (auto& r : rows)
+    {
+        auto row = a.removeFromTop (rowH);
+        r->name.setBounds (row.removeFromLeft (nameW));
+        r->en.button.setBounds (row.removeFromLeft (onW).withSizeKeepingCentre (24, 24));
+        for (auto& k : r->knobs) k->s.setBounds (row.removeFromLeft (kw).reduced (2));
+        r->arp.button.setBounds (row.removeFromLeft (arpW).withSizeKeepingCentre (24, 24));
+    }
+}
+
+// ---------------- FxPage ----------------
+FxPage::FxPage (AuraProcessor& p)
+    : sat (*this, p.apvts, "Saturation"), cho (*this, p.apvts, "Chorus (send)"),
+      dly (*this, p.apvts, "Delay (send)"), rev (*this, p.apvts, "Reverb FDN (send)"),
+      lim (*this, p.apvts, "Limiter"), mst (*this, p.apvts, "Master")
+{
+    auto& s = p.apvts;
+    satOn.init (*this, s, "satOn", "On");
+    satMode.init (*this, s, "satMode", "Mode", { "Tanh", "Hard Clip", "Asymmetric" });
+    sat.knobs.add ("satDrive", "Drive (dB)");
+    sat.knobs.add ("satMix", "Mix");
+
+    cho.knobs.add ("choRate", "Rate");
+    cho.knobs.add ("choDepth", "Depth");
+    cho.knobs.add ("choRet", "Return");
+
+    dlyPing.init (*this, s, "dlyPing", "Ping-pong");
+    dly.knobs.add ("dlyTime", "Time (ms)");
+    dly.knobs.add ("dlyFb", "Feedback");
+    dly.knobs.add ("dlyDamp", "Damping");
+    dly.knobs.add ("dlyRet", "Return");
+
+    rev.knobs.add ("revDecay", "Decay (s)");
+    rev.knobs.add ("revSize", "Size");
+    rev.knobs.add ("revDamp", "Damping");
+    rev.knobs.add ("revPre", "Pre-delay");
+    rev.knobs.add ("revRet", "Return");
+
+    limOn.init (*this, s, "limOn", "On");
+    lim.knobs.add ("limCeil", "Ceiling (dB)");
+    lim.knobs.add ("limRel", "Release (ms)");
+
+    mst.knobs.add ("master", "Master");
+}
+
+void FxPage::resized()
+{
+    auto a = getLocalBounds().reduced (8);
+    const int colW = a.getWidth() / 3, rowH = a.getHeight() / 2;
+    auto cell = [&] (int c, int r)
+    {
+        return juce::Rectangle<int> (a.getX() + c * colW, a.getY() + r * rowH, colW, rowH).reduced (4);
+    };
+
+    {   auto r = cell (0, 0);
+        sat.title.setBounds (r.removeFromTop (24));
+        auto band = r.removeFromTop (28);
+        satOn.button.setBounds (band.removeFromLeft (60));
+        satMode.place (band, 45, 120);
+        sat.knobs.layout (r, 2); }
+    {   auto r = cell (1, 0);
+        cho.title.setBounds (r.removeFromTop (24));
+        r.removeFromTop (28);
+        cho.knobs.layout (r, 3); }
+    {   auto r = cell (2, 0);
+        dly.title.setBounds (r.removeFromTop (24));
+        dlyPing.button.setBounds (r.removeFromTop (28).removeFromLeft (120));
+        dly.knobs.layout (r, 4); }
+    {   auto r = cell (0, 1);
+        rev.title.setBounds (r.removeFromTop (24));
+        r.removeFromTop (28);
+        rev.knobs.layout (r, 5); }
+    {   auto r = cell (1, 1);
+        lim.title.setBounds (r.removeFromTop (24));
+        limOn.button.setBounds (r.removeFromTop (28).removeFromLeft (80));
+        lim.knobs.layout (r, 2); }
+    {   auto r = cell (2, 1);
+        mst.title.setBounds (r.removeFromTop (24));
+        r.removeFromTop (28);
+        mst.knobs.layout (r, 1); }
+}
+
+// ---------------- ArpPage ----------------
+ArpPage::ArpPage (AuraProcessor& p) : knobs (*this, p.apvts)
+{
+    on.init (*this, p.apvts, "arpon", "Arpeggiator on");
+    latch.init (*this, p.apvts, "arplatch", "Latch");
+    mode.init (*this, p.apvts, "arpmode", "Mode", { "Up", "Down", "Up/Down", "Random", "As Played", "Chord" });
+    rate.init (*this, p.apvts, "arprate", "Rate", { "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32" });
+    knobs.add ("arpoct", "Octaves");
+    knobs.add ("arpgate", "Gate");
+    knobs.add ("arpswing", "Swing");
+
+    hint.setText ("The arpeggiator follows the host tempo and transport. "
+                  "Enable 'Arp' per layer in the Routing tab; other layers keep playing the raw keys.",
+                  juce::dontSendNotification);
+    hint.setColour (juce::Label::textColourId, juce::Colours::grey);
+    hint.setJustificationType (juce::Justification::topLeft);
+    addAndMakeVisible (hint);
+}
+
+void ArpPage::resized()
+{
+    auto a = getLocalBounds().reduced (12);
+    auto r1 = a.removeFromTop (30);
+    on.button.setBounds (r1.removeFromLeft (170));
+    latch.button.setBounds (r1.removeFromLeft (100));
+    a.removeFromTop (6);
+    auto r2 = a.removeFromTop (30);
+    mode.place (r2, 50, 130);
+    rate.place (r2, 50, 100);
+    a.removeFromTop (10);
+    knobs.layout (a.removeFromTop (130), 3);
+    hint.setBounds (a);
 }
 
 // ---------------- AuraEditor ----------------
 AuraEditor::AuraEditor (AuraProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), sound (p), mod (p), mseg (p)
+    : AudioProcessorEditor (&p), proc (p), routing (p), fx (p), arpPage (p)
 {
-    tabs.addTab ("Sound", juce::Colour (0xff1b1e26), &sound, false);
-    tabs.addTab ("Mod",   juce::Colour (0xff1b1e26), &mod, false);
-    tabs.addTab ("MSEG",  juce::Colour (0xff1b1e26), &mseg, false);
+    for (int l = 0; l < kLayers; ++l)
+    {
+        layerPages.push_back (std::make_unique<LayerPage> (p, l));
+        tabs.addTab ("Layer " + juce::String (l + 1), kPanel, layerPages.back().get(), false);
+    }
+    tabs.addTab ("Routing", kPanel, &routing, false);
+    tabs.addTab ("FX",      kPanel, &fx, false);
+    tabs.addTab ("Arp",     kPanel, &arpPage, false);
     addAndMakeVisible (tabs);
 
     setResizable (true, true);
-    setResizeLimits (720, 520, 1800, 1000);
-    setSize (800, 620);
+    setResizeLimits (820, 600, 1800, 1100);
+    setSize (940, 700);
 }
 
 void AuraEditor::filesDropped (const juce::StringArray& files, int, int)
@@ -388,7 +598,11 @@ void AuraEditor::filesDropped (const juce::StringArray& files, int, int)
             list.add (f);
         }
     }
-    if (! list.isEmpty()) sound.loadFiles (list);
+    if (list.isEmpty()) return;
+
+    int idx = tabs.getCurrentTabIndex();
+    if (idx < 0 || idx >= kLayers) idx = 0;
+    layerPages[(size_t) idx]->loadFiles (list);
 }
 
 void AuraEditor::paint (juce::Graphics& g)

@@ -1,25 +1,26 @@
-# AURA v0.3 - synthese + modulation
+# AURA v0.4 - layers, routage, effets, arpegiateur, 2 MSEG
 
 ## Build
-GitHub Actions (build.yml fourni). Artefact : AURA-vst3-win64.
+GitHub Actions (build.yml inchange). Artefact : AURA-vst3-win64.
 
-## Synthese (onglet Sound)
-- Saw / Square (PolyBLEP) / Wavetable (8 frames, mipmaps 11 niveaux) / FM (3 operateurs).
-- Unison 1..7 + detune (saw, square, wavetable). FM : 3 algorithmes, ratios, indice, feedback.
-- Samples (v0.2) combinables : Source = Synth / Sample / Synth+Sample.
+## Layers (LayerParams.h : kLayers = 4, modifiable)
+Chaque couche a son moteur complet : Sound (Saw/Square/Wavetable/FM + samples), Mod (8 slots,
+2 LFO, enveloppe de mod, 4 macros), MSEG (2 courbes independantes), son propre dossier de samples.
+Sources de mod : Mod Env, LFO 1/2, MSEG 1/2, Velocity, Key, Mod Wheel, Random, Macro 1-4.
 
-## Modulation (onglet Mod)
-8 slots : Source -> Destination x Amount (-1..1), additifs.
-Sources : Mod Env, LFO 1/2, MSEG, Velocity, Key, Mod Wheel (CC1), Random (par note), Macro 1-4.
-Destinations : Pitch (+-24 st), Cutoff (+-5 oct), Resonance, WT Position, FM Index, Detune, Level.
-Controle a 32 echantillons. Pitch bend +-2 st.
+## Routing
+Par couche : On, plage de touches, plage de velocite, transposition, niveau, pan,
+envois Chorus / Delay / Reverb, flag Arp.
 
-## MSEG (onglet MSEG)
-Jusqu'a 16 points. Double-clic : ajouter/supprimer. Losange orange : courbure du segment.
-Temps (0.01-20 s) + Loop. Sauvegarde dans le projet.
+## FX
+Saturation (ADAA tanh / hard clip / asymetrique) -> bus Chorus, Delay (ping-pong),
+Reverb FDN 8 lignes (Hadamard) -> Master -> Limiteur look-ahead 1,5 ms (latence rapportee au DAW).
 
-## Recettes de test
-- Pad evolutif : Wave=Wavetable, mod slot 1 = LFO 1 -> WT Position 0.8 (LFO1 rate 0.3 Hz).
-- Pluck : Mod Env -> Cutoff +0.8, Env Decay 0.25, Sustain 0.
-- Pluck FM : Wave=FM, slot MSEG -> FM Index 0.6, MSEG decroissant.
-- Vibrato : LFO 2 -> Pitch 0.02 (mod wheel : slot Mod Wheel -> Pitch 0.05).
+## Arpegiateur (global, applique aux couches dont "Arp" est coche)
+Up, Down, Up/Down, Random, As Played, Chord - 6 vitesses (dont triolets), 1-4 octaves,
+gate, swing, latch. Synchro sur le tempo et la position du transport de l'hote.
+
+## Tests suggeres
+- Couche 1 : Saw unison, Routing : Reverb 0.4, Delay 0.2.
+- Couche 2 : FM, Key Lo = 0 / Key Hi = 59 (split), Transpose -12.
+- Arp On + Arp coche sur la couche 1 seulement : la couche 2 reste jouee en direct.
