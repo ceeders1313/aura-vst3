@@ -1,7 +1,15 @@
-# AURA v0.5 - step sequenceur par couche + correctifs audio
+# AURA v0.6 - nouvelle interface (page par couche, routage en graphe)
 
 ## Build
 GitHub Actions (build.yml inchange). Artefact : AURA-vst3-win64.
+
+## Nouveau en v0.6 (UI uniquement, moteur inchange)
+- Barre du haut : logo, emplacement preset (browser a venir), pages LAYER / ROUTING / ARP, Output.
+- Bandeau des couches : un onglet par couche (couleur, on/off, type de son).
+- Page LAYER, sections toujours visibles : Oscillator/Sample | Filter (courbe) | Amp (enveloppe dessinee),
+  Modulation sources (Mod Env, LFO 1/2, MSEG 1/2, Step Seq) | Mod matrix, Zone / Sends / Macros.
+- Page ROUTING : graphe Couches -> FX (Chorus, Delay, Reverb) -> Master FX -> OUT ; epaisseur des cables
+  = niveau / envoi ; clic sur un noeud = inspecteur a droite ; double-clic sur une couche = sa page.
 
 ## Nouveau en v0.5
 - **Step sequenceur par couche** (onglet Layer n > Seq) : 16 pas, lignes Gate / Velocity / Pitch,
