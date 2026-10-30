@@ -142,6 +142,50 @@ private:
     juce::Label hint;
 };
 
+// Grille du sequenceur : 3 lignes (Gate / Velocity / Pitch) x 16 pas, edition a la souris.
+class StepSeqEditor : public juce::Component, private juce::Timer
+{
+public:
+    StepSeqEditor (AuraProcessor&, int layer);
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override { dragLane = -1; }
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+
+private:
+    enum Lane { LaneGate = 0, LaneVel, LanePitch, kNumLanes };
+
+    void timerCallback() override;
+    juce::Rectangle<float> laneRect (int lane) const;
+    int laneAt (juce::Point<float> p) const;
+    int stepAt (float x) const;
+    float get (int step, int part) const;
+    void set (int step, int part, float value);
+    void editAt (juce::Point<float> p);
+
+    AuraProcessor& proc;
+    int layer;
+    juce::RangedAudioParameter* prm[aura::kSeqSteps][3] {};
+    juce::RangedAudioParameter* lenParam = nullptr;
+    int dragLane = -1, lastStep = -2, tick = 0;
+    bool paintOn = true;
+};
+
+class SeqPage : public juce::Component
+{
+public:
+    SeqPage (AuraProcessor&, int layer);
+    void resized() override;
+
+private:
+    ToggleBox on;
+    LabeledCombo rate;
+    KnobSet knobs;
+    StepSeqEditor editor;
+    juce::Label hint;
+};
+
 class LayerPage : public juce::Component
 {
 public:
@@ -154,6 +198,7 @@ private:
     SoundPage sound;
     ModPage mod;
     MsegPage mseg;
+    SeqPage seq;
     juce::TabbedComponent inner { juce::TabbedButtonBar::TabsAtTop };
 };
 

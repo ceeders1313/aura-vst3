@@ -55,13 +55,21 @@ APVTS::ParameterLayout AuraProcessor::createLayout()
                         break;
                 }
             }
-            else
+            else if (lp < aura::LP_StepBase)
             {
                 const int j = (lp - aura::LP_SlotBase) / 3, t = (lp - aura::LP_SlotBase) % 3;
                 const juce::String n = prefix + "Mod " + juce::String (j + 1);
                 if (t == 0)      choice (id, n + " Source", srcItems, 0);
                 else if (t == 1) choice (id, n + " Dest", dstItems, 0);
                 else             flt (id, n + " Amount", NormalisableRange<float> (-1.f, 1.f), 0.f);
+            }
+            else
+            {
+                const int j = (lp - aura::LP_StepBase) / 3, t = (lp - aura::LP_StepBase) % 3;
+                const juce::String n = prefix + "Step " + juce::String (j + 1);
+                if (t == 0)      boolean (id, n + " On", true);
+                else if (t == 1) p.push_back (std::make_unique<juce::AudioParameterInt> (pid (id), n + " Pitch", -24, 24, 0));
+                else             flt (id, n + " Velocity", NormalisableRange<float> (0.f, 1.f), 0.8f);
             }
         }
     }
@@ -133,7 +141,14 @@ AuraProcessor::AuraProcessor()
 
 void AuraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    for (auto& l : layers) l.synth.prepare (sampleRate);
+    for (auto& l : layers)
+    {
+        l.synth.prepare (sampleRate);
+        l.seq.prepare (sampleRate);
+        l.seqMidi.ensureSize (8192);
+        l.gInit = false;
+    }
+    globalInit = false;
 
     bufCap = std::max (samplesPerBlock, 16384);
     layerBuf.setSize (2, bufCap);
@@ -198,9 +213,46 @@ void AuraProcessor::fillParams (int l, aura::Params& p) const
     p.gain = 1.f;
 }
 
+void AuraProcessor::fillSeq (int l, aura::SeqParams& s) const
+{
+    using namespace aura;
+    auto P = [&] (int id) { return lpPtr[l][id]->load(); };
+
+    s.on     = P (LP_SeqOn) > 0.5f;
+    s.rate   = int (P (LP_SeqRate) + 0.5f);
+    s.length = int (P (LP_SeqLen) + 0.5f);
+    s.gate   = P (LP_SeqGate);
+    s.swing  = P (LP_SeqSwing);
+    s.keyLo  = int (P (LP_KeyLo) + 0.5f);
+    s.keyHi  = int (P (LP_KeyHi) + 0.5f);
+    s.velLo  = int (P (LP_VelLo) + 0.5f);
+    s.velHi  = int (P (LP_VelHi) + 0.5f);
+    if (! s.on) return;
+    for (int i = 0; i < kSeqSteps; ++i)
+    {
+        s.steps[i].on    = P (lpStep (i, 0)) > 0.5f;
+        const float pt   = P (lpStep (i, 1));
+        s.steps[i].pitch = int (pt + (pt >= 0.f ? 0.5f : -0.5f));
+        s.steps[i].vel   = P (lpStep (i, 2));
+    }
+}
+
 static void addScaled (float* dst, const float* src, int n, float g)
 {
     for (int i = 0; i < n; ++i) dst[i] += src[i] * g;
+}
+
+// Ajout avec rampe lineaire de gain sur le bloc (anti-zipper)
+static void addRamp (float* dst, const float* src, int n, float g0, float g1)
+{
+    if (g0 == g1)
+    {
+        if (g1 != 0.f) addScaled (dst, src, n, g1);
+        return;
+    }
+    const float step = (g1 - g0) / float (n);
+    float g = g0;
+    for (int i = 0; i < n; ++i) { g += step; dst[i] += src[i] * g; }
 }
 
 void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -210,7 +262,7 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     buffer.clear();
 
     const int n = buffer.getNumSamples();
-    if (n > bufCap || buffer.getNumChannels() < 2) return;
+    if (n <= 0 || n > bufCap || buffer.getNumChannels() < 2) return;
 
     // ---- transport + arpegiateur ----
     double bpm = 120.0, ppq = 0.0;
@@ -248,7 +300,7 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
 
         if (P (LP_Enable) < 0.5f)
         {
-            if (L.wasOn) { L.synth.killAll(); L.wasOn = false; }
+            if (L.wasOn) { L.synth.killAll(); L.seq.reset(); L.wasOn = false; L.gInit = false; }
             continue;
         }
         L.wasOn = true;
@@ -264,32 +316,43 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
                     if (L.msegDirty[k]) { L.synth.setMseg (k, L.mseg[k]); L.msegDirty[k] = false; }
         }
 
+        // MIDI : direct ou arpege, puis sequenceur pas a pas de la couche
+        const juce::MidiBuffer& srcMidi = (P (LP_Arp) > 0.5f) ? arpMidi : midi;
+        SeqParams sp;
+        fillSeq (l, sp);
+        L.seqMidi.clear();
+        const bool useSeq = L.seq.process (srcMidi, L.seqMidi, n, sp, bpm, playing, ppq, havePpq);
+
         Params prm;
         fillParams (l, prm);
+        prm.zoneBypass = sp.on;
         L.synth.setParams (prm);
 
         layerBuf.clear (0, n);
-        const bool useArp = P (LP_Arp) > 0.5f;
         L.synth.process (layerBuf.getWritePointer (0), layerBuf.getWritePointer (1), n,
-                         useArp ? arpMidi : midi);
+                         useSeq ? L.seqMidi : srcMidi);
 
         const float level = P (LP_Level);
         const float pan = juce::jlimit (-1.f, 1.f, P (LP_Pan));
         const float ang = (pan + 1.f) * 0.25f * 3.14159265f;
-        const float gl = level * std::cos (ang), gr = level * std::sin (ang);
+        const float cl = std::cos (ang) * 1.41421356f, cr = std::sin (ang) * 1.41421356f;
+        const float sCho = P (LP_SendCho) * 0.7f, sDly = P (LP_SendDly) * 0.7f, sRev = P (LP_SendRev) * 0.7f;
+
+        const float g[8] = { level * cl, level * cr,
+                             level * sCho * cl, level * sCho * cr,
+                             level * sDly * cl, level * sDly * cr,
+                             level * sRev * cl, level * sRev * cr };
+        if (! L.gInit) { std::copy (g, g + 8, L.gPrev); L.gInit = true; }
+
         const float* sl = layerBuf.getReadPointer (0);
         const float* sr = layerBuf.getReadPointer (1);
-
-        addScaled (dryBus.getWritePointer (0), sl, n, gl * 1.41421356f);
-        addScaled (dryBus.getWritePointer (1), sr, n, gr * 1.41421356f);
-
-        const float sCho = P (LP_SendCho), sDly = P (LP_SendDly), sRev = P (LP_SendRev);
-        if (sCho > 0.0001f) { addScaled (choBus.getWritePointer (0), sl, n, level * sCho * 0.7f * std::cos (ang) * 1.41421356f);
-                              addScaled (choBus.getWritePointer (1), sr, n, level * sCho * 0.7f * std::sin (ang) * 1.41421356f); }
-        if (sDly > 0.0001f) { addScaled (dlyBus.getWritePointer (0), sl, n, level * sDly * 0.7f * std::cos (ang) * 1.41421356f);
-                              addScaled (dlyBus.getWritePointer (1), sr, n, level * sDly * 0.7f * std::sin (ang) * 1.41421356f); }
-        if (sRev > 0.0001f) { addScaled (revBus.getWritePointer (0), sl, n, level * sRev * 0.7f * std::cos (ang) * 1.41421356f);
-                              addScaled (revBus.getWritePointer (1), sr, n, level * sRev * 0.7f * std::sin (ang) * 1.41421356f); }
+        juce::AudioBuffer<float>* bus[4] = { &dryBus, &choBus, &dlyBus, &revBus };
+        for (int b = 0; b < 4; ++b)
+        {
+            addRamp (bus[b]->getWritePointer (0), sl, n, L.gPrev[2 * b],     g[2 * b]);
+            addRamp (bus[b]->getWritePointer (1), sr, n, L.gPrev[2 * b + 1], g[2 * b + 1]);
+        }
+        std::copy (g, g + 8, L.gPrev);
     }
 
     float* dL = dryBus.getWritePointer (0);
@@ -297,25 +360,34 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     float* fL = fxOut.getWritePointer (0);
     float* fR = fxOut.getWritePointer (1);
 
-    // ---- bus d'effets ----
+    // ---- bus d'effets (retours avec rampe) ----
+    const float ret[3] = { gp.choRet->load(), gp.dlyRet->load(), gp.revRet->load() };
+    const float mg = gp.master->load();
+    if (! globalInit) { std::copy (ret, ret + 3, retPrev); masterPrev = mg; globalInit = true; }
+
     chorus.process (choBus.getReadPointer (0), choBus.getReadPointer (1), fL, fR, n,
                     gp.choRate->load(), gp.choDepth->load());
-    { const float r = gp.choRet->load(); addScaled (dL, fL, n, r); addScaled (dR, fR, n, r); }
+    addRamp (dL, fL, n, retPrev[0], ret[0]); addRamp (dR, fR, n, retPrev[0], ret[0]);
 
     delayFx.process (dlyBus.getReadPointer (0), dlyBus.getReadPointer (1), fL, fR, n,
                      gp.dlyTime->load(), gp.dlyFb->load(), gp.dlyDamp->load(), gp.dlyPing->load() > 0.5f);
-    { const float r = gp.dlyRet->load(); addScaled (dL, fL, n, r); addScaled (dR, fR, n, r); }
+    addRamp (dL, fL, n, retPrev[1], ret[1]); addRamp (dR, fR, n, retPrev[1], ret[1]);
 
     reverb.process (revBus.getReadPointer (0), revBus.getReadPointer (1), fL, fR, n,
                     gp.revDecay->load(), gp.revSize->load(), gp.revDamp->load(), gp.revPre->load());
-    { const float r = gp.revRet->load(); addScaled (dL, fL, n, r); addScaled (dR, fR, n, r); }
+    addRamp (dL, fL, n, retPrev[2], ret[2]); addRamp (dR, fR, n, retPrev[2], ret[2]);
+    std::copy (ret, ret + 3, retPrev);
 
     // ---- master : saturation -> gain -> limiteur ----
     if (gp.satOn->load() > 0.5f)
         saturator.process (dL, dR, n, int (gp.satMode->load() + 0.5f), gp.satDrive->load(), gp.satMix->load());
 
-    const float mg = gp.master->load();
-    for (int i = 0; i < n; ++i) { dL[i] *= mg; dR[i] *= mg; }
+    {
+        const float step = (mg - masterPrev) / float (n);
+        float gm = masterPrev;
+        for (int i = 0; i < n; ++i) { gm += step; dL[i] *= gm; dR[i] *= gm; }
+        masterPrev = mg;
+    }
 
     const float ceilLin = std::pow (10.f, gp.limCeil->load() / 20.f);
     limiter.process (dL, dR, n, ceilLin, gp.limRel->load(), gp.limOn->load() > 0.5f);

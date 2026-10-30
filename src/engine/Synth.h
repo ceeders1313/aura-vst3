@@ -39,6 +39,7 @@ struct Params
 
     // zone de la couche
     int keyLo = 0, keyHi = 127, velLo = 1, velHi = 127, transpose = 0;
+    bool zoneBypass = false;   // true quand le sequenceur filtre deja la zone (notes transposees par pas)
 
     float gain = 1.f;
     float modWheel = 0.f;
@@ -173,7 +174,19 @@ public:
         env.reset();  env.noteOn();
         menv.reset(); menv.noteOn();
         mlev = 0.f;
+        fadeGain = 1.f;
+        fadeStep = 0.f;
     }
+
+    // Fondu rapide (4 ms) d'une voix volee : evite le clic de coupure.
+    void beginFade (float fs)
+    {
+        released = true;
+        holdOneShot = false;
+        fadeGain = 1.f;
+        fadeStep = 1.f / (0.004f * fs);
+    }
+    float fadeLevel() const { return fadeGain; }
 
     void stop()
     {
@@ -409,8 +422,14 @@ private:
             l = fl.lowpass (l, a1, a2, a3);
             r = fr.lowpass (r, a1, a2, a3);
 
-            const float e = env.next (p.atk, p.dec, p.sus, p.rel, fs) * vel * mo.level;
+            float e = env.next (p.atk, p.dec, p.sus, p.rel, fs) * vel * mo.level;
             mlev = menv.next (p.matk, p.mdec, p.msus, p.mrel, fs);
+            if (fadeStep > 0.f)
+            {
+                fadeGain -= fadeStep;
+                if (fadeGain <= 0.f) { active = false; break; }
+                e *= fadeGain;
+            }
             L[s] += l * e;
             R[s] += r * e;
 
@@ -428,6 +447,7 @@ private:
 
     Adsr env, menv;
     float mlev = 0.f;
+    float fadeGain = 1.f, fadeStep = 0.f;
     float lfoPh[2] {}, lfoSH[2] {};
     double msegPos[2] { 0.0, 0.0 };
     uint32_t rng = 1;
@@ -442,19 +462,38 @@ public:
 
     Synth() { ctx.mseg = mseg; }
 
+    static constexpr int kFadeVoices = 8;
+
     void prepare (double sampleRate)
     {
         fs = float (sampleRate);
+        smoothInit = false;
         killAll();
     }
 
-    void killAll() { for (auto& v : voices) v.kill(); }
+    void killAll()
+    {
+        for (auto& v : voices) v.kill();
+        for (auto& v : fading) v.kill();
+    }
 
+    // Les parametres continus (cutoff, res, WT, detune, FM, macros) sont lisses par tranche
+    // de kChunk echantillons pour eviter le zipper quand on tourne un bouton.
     void setParams (const Params& p)
     {
         params = p;
         params.modWheel = modWheel;
         params.bend = bend;
+
+        tgt.cut = std::log2 (std::max (p.cutoff, 1.f));
+        tgt.res = p.res;
+        tgt.wt  = p.wtPos;
+        tgt.det = p.detune;
+        tgt.fmIdx = p.fmIndex;
+        tgt.fmFb  = p.fmFeedback;
+        for (int k = 0; k < 4; ++k) tgt.macro[k] = p.macro[k];
+        if (! smoothInit) { cur = tgt; smoothInit = true; }
+        applySmooth();
     }
     void setBank (const SampleBank::Ptr& b) { bank = b; }
     void setMseg (int idx, const MsegShape& s) { mseg[idx & 1] = s; }
@@ -466,11 +505,11 @@ public:
         for (const auto meta : midi)
         {
             const int t = juce::jlimit (pos, numSamples, meta.samplePosition);
-            renderVoices (L + pos, R + pos, t - pos);
+            renderRange (L, R, pos, t);
             pos = t;
             handle (meta.getMessage());
         }
-        renderVoices (L + pos, R + pos, numSamples - pos);
+        renderRange (L, R, pos, numSamples);
 
         const float g = params.gain;
         if (g != 1.f)
@@ -478,6 +517,45 @@ public:
     }
 
 private:
+    static constexpr int kChunk = 32;
+
+    struct Smooth { float cut = 13.f, res = 0.8f, wt = 0.f, det = 0.f, fmIdx = 0.f, fmFb = 0.f, macro[4] {}; };
+
+    void applySmooth()
+    {
+        params.cutoff = std::exp2 (cur.cut);
+        params.res = cur.res;
+        params.wtPos = cur.wt;
+        params.detune = cur.det;
+        params.fmIndex = cur.fmIdx;
+        params.fmFeedback = cur.fmFb;
+        for (int k = 0; k < 4; ++k) params.macro[k] = cur.macro[k];
+    }
+
+    void advanceSmooth (int m)
+    {
+        const float a = 1.f - std::exp (-float (m) / (0.015f * fs));   // ~15 ms
+        cur.cut   += (tgt.cut - cur.cut) * a;
+        cur.res   += (tgt.res - cur.res) * a;
+        cur.wt    += (tgt.wt - cur.wt) * a;
+        cur.det   += (tgt.det - cur.det) * a;
+        cur.fmIdx += (tgt.fmIdx - cur.fmIdx) * a;
+        cur.fmFb  += (tgt.fmFb - cur.fmFb) * a;
+        for (int k = 0; k < 4; ++k) cur.macro[k] += (tgt.macro[k] - cur.macro[k]) * a;
+        applySmooth();
+    }
+
+    void renderRange (float* L, float* R, int start, int end)
+    {
+        while (start < end)
+        {
+            const int m = std::min (kChunk, end - start);
+            advanceSmooth (m);
+            renderVoices (L + start, R + start, m);
+            start += m;
+        }
+    }
+
     void handle (const juce::MidiMessage& m)
     {
         if (m.isNoteOn())         noteOn (m.getNoteNumber(), m.getFloatVelocity());
@@ -499,8 +577,11 @@ private:
     void noteOn (int note, float vel)
     {
         const int vel127 = juce::jlimit (1, 127, int (vel * 127.f + 0.5f));
-        if (note < params.keyLo || note > params.keyHi) return;
-        if (vel127 < params.velLo || vel127 > params.velHi) return;
+        if (! params.zoneBypass)
+        {
+            if (note < params.keyLo || note > params.keyHi) return;
+            if (vel127 < params.velLo || vel127 > params.velHi) return;
+        }
 
         const int snote = juce::jlimit (0, 127, note + params.transpose);
 
@@ -527,6 +608,16 @@ private:
                                   + float (counter - v.age) * 0.01f;
                 if (score > best) { best = score; target = &v; }
             }
+
+            // la voix volee continue quelques ms en fondu dans un emplacement dedie
+            Voice* slot = &fading[0];
+            for (auto& f : fading)
+            {
+                if (! f.active) { slot = &f; break; }
+                if (f.fadeLevel() < slot->fadeLevel()) slot = &f;
+            }
+            *slot = *target;
+            slot->beginFade (fs);
         }
         target->start (snote, vel, ++counter, params, bank, zone);
         target->trigNote = note;
@@ -543,9 +634,14 @@ private:
         if (n <= 0) return;
         for (auto& v : voices)
             if (v.active) v.render (L, R, n, params, ctx, fs);
+        for (auto& v : fading)
+            if (v.active) v.render (L, R, n, params, ctx, fs);
     }
 
     std::array<Voice, kVoices> voices;
+    std::array<Voice, kFadeVoices> fading;
+    Smooth cur, tgt;
+    bool smoothInit = false;
     std::array<uint32_t, 128> rrCounter {};
     SampleBank::Ptr bank;
     MsegShape mseg[2];

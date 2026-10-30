@@ -369,14 +369,226 @@ void MsegPage::resized()
     }
 }
 
+// ---------------- StepSeqEditor ----------------
+static constexpr float kSeqLabelW = 64.f;
+
+StepSeqEditor::StepSeqEditor (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
+{
+    for (int i = 0; i < kSeqSteps; ++i)
+        for (int k = 0; k < 3; ++k)
+            prm[i][k] = proc.apvts.getParameter (lpId (layer, lpStep (i, k)));
+    lenParam = proc.apvts.getParameter (lpId (layer, LP_SeqLen));
+    startTimerHz (30);
+}
+
+juce::Rectangle<float> StepSeqEditor::laneRect (int lane) const
+{
+    auto a = getLocalBounds().toFloat().reduced (4.f);
+    a.removeFromLeft (kSeqLabelW);
+    auto gate = a.removeFromTop (28.f);
+    a.removeFromTop (8.f);
+    const float h = (a.getHeight() - 8.f) * 0.5f;
+    auto vel = a.removeFromTop (h);
+    a.removeFromTop (8.f);
+    if (lane == LaneGate) return gate;
+    if (lane == LaneVel)  return vel;
+    return a;
+}
+
+int StepSeqEditor::laneAt (juce::Point<float> p) const
+{
+    for (int l = 0; l < kNumLanes; ++l)
+        if (laneRect (l).expanded (0.f, 4.f).contains (p)) return l;
+    return -1;
+}
+
+int StepSeqEditor::stepAt (float x) const
+{
+    const auto r = laneRect (LaneGate);
+    return juce::jlimit (0, kSeqSteps - 1, int ((x - r.getX()) / r.getWidth() * float (kSeqSteps)));
+}
+
+float StepSeqEditor::get (int step, int part) const
+{
+    auto* p = prm[step][part];
+    return p != nullptr ? p->convertFrom0to1 (p->getValue()) : 0.f;
+}
+
+void StepSeqEditor::set (int step, int part, float value)
+{
+    auto* p = prm[step][part];
+    if (p == nullptr) return;
+    const float nv = p->convertTo0to1 (value);
+    if (std::abs (p->getValue() - nv) < 1e-6f) return;
+    p->beginChangeGesture();
+    p->setValueNotifyingHost (nv);
+    p->endChangeGesture();
+    repaint();
+}
+
+void StepSeqEditor::editAt (juce::Point<float> pt)
+{
+    const int s = stepAt (pt.x);
+    const auto r = laneRect (dragLane);
+    if (dragLane == LaneGate)
+    {
+        set (s, 0, paintOn ? 1.f : 0.f);
+    }
+    else if (dragLane == LaneVel)
+    {
+        set (s, 2, juce::jlimit (0.f, 1.f, (r.getBottom() - pt.y) / r.getHeight()));
+    }
+    else if (dragLane == LanePitch)
+    {
+        const float v = (r.getCentreY() - pt.y) / (r.getHeight() * 0.5f) * 24.f;
+        set (s, 1, (float) juce::jlimit (-24, 24, juce::roundToInt (v)));
+    }
+}
+
+void StepSeqEditor::mouseDown (const juce::MouseEvent& e)
+{
+    dragLane = laneAt (e.position);
+    if (dragLane < 0) return;
+    if (dragLane == LaneGate) paintOn = get (stepAt (e.position.x), 0) < 0.5f;
+    editAt (e.position);
+}
+
+void StepSeqEditor::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragLane >= 0) editAt (e.position);
+}
+
+void StepSeqEditor::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int lane = laneAt (e.position);
+    const int s = stepAt (e.position.x);
+    if (lane == LaneVel)   set (s, 2, 0.8f);
+    if (lane == LanePitch) set (s, 1, 0.f);
+}
+
+void StepSeqEditor::timerCallback()
+{
+    const int st = proc.getSeqStep (layer);
+    if (st != lastStep || ++tick >= 6)   // pas courant + rafraichissement automation (~5 Hz)
+    {
+        lastStep = st;
+        tick = 0;
+        repaint();
+    }
+}
+
+void StepSeqEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (0xff0e1015));
+
+    const int len = lenParam != nullptr ? juce::roundToInt (lenParam->convertFrom0to1 (lenParam->getValue())) : kSeqSteps;
+    const int cur = proc.getSeqStep (layer);
+
+    static const char* const names[kNumLanes] = { "Gate", "Velocity", "Pitch" };
+    g.setFont (juce::FontOptions (13.f));
+    for (int l = 0; l < kNumLanes; ++l)
+    {
+        const auto r = laneRect (l);
+        g.setColour (juce::Colours::grey);
+        g.drawText (names[l], juce::Rectangle<float> (4.f, r.getY(), kSeqLabelW - 8.f, r.getHeight()),
+                    juce::Justification::centredLeft);
+        g.setColour (juce::Colour (0xff171a22));
+        g.fillRect (r);
+    }
+
+    const auto gate = laneRect (LaneGate), vel = laneRect (LaneVel), pit = laneRect (LanePitch);
+    const float w = gate.getWidth() / float (kSeqSteps);
+
+    for (int i = 0; i < kSeqSteps; ++i)
+    {
+        const float x = gate.getX() + float (i) * w;
+        const bool inLen = i < len;
+        const bool on = get (i, 0) > 0.5f;
+        const float alpha = inLen ? 1.f : 0.25f;
+
+        if (i == cur)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.08f));
+            g.fillRect (x, gate.getY(), w, pit.getBottom() - gate.getY());
+        }
+        if (i % 4 == 0)
+        {
+            g.setColour (juce::Colour (0xff2c313d));
+            g.drawVerticalLine ((int) x, gate.getY(), pit.getBottom());
+        }
+
+        // gate
+        auto cell = juce::Rectangle<float> (x, gate.getY(), w, gate.getHeight()).reduced (3.f);
+        if (on) { g.setColour (kAccent.withAlpha (alpha)); g.fillRoundedRectangle (cell, 3.f); }
+        else    { g.setColour (juce::Colours::grey.withAlpha (alpha)); g.drawRoundedRectangle (cell, 3.f, 1.f); }
+        if (i == cur && on) { g.setColour (juce::Colours::white); g.drawRoundedRectangle (cell, 3.f, 2.f); }
+
+        // velocite
+        const float v = get (i, 2);
+        auto bar = juce::Rectangle<float> (x + 3.f, vel.getBottom() - v * vel.getHeight(), w - 6.f, v * vel.getHeight());
+        g.setColour (kAccent.withAlpha ((on ? 0.85f : 0.3f) * alpha));
+        g.fillRect (bar);
+
+        // hauteur
+        const int pt = juce::roundToInt (get (i, 1));
+        const float half = pit.getHeight() * 0.5f;
+        const float py = pit.getCentreY() - float (pt) / 24.f * half;
+        g.setColour (juce::Colours::orange.withAlpha ((on ? 0.85f : 0.3f) * alpha));
+        g.fillRect (juce::Rectangle<float> (x + 3.f, std::min (py, pit.getCentreY()), w - 6.f,
+                                            std::max (2.f, std::abs (py - pit.getCentreY()))));
+        if (pt != 0)
+        {
+            g.setColour (juce::Colours::white.withAlpha (alpha));
+            g.drawText ((pt > 0 ? "+" : "") + juce::String (pt),
+                        juce::Rectangle<float> (x, pit.getY() + 2.f, w, 14.f), juce::Justification::centred);
+        }
+    }
+
+    g.setColour (juce::Colour (0xff3a404d));
+    g.drawHorizontalLine ((int) pit.getCentreY(), pit.getX(), pit.getRight());
+}
+
+// ---------------- SeqPage ----------------
+SeqPage::SeqPage (AuraProcessor& p, int layer) : knobs (*this, p.apvts), editor (p, layer)
+{
+    on.init (*this, p.apvts, lpId (layer, LP_SeqOn), "Sequencer on");
+    rate.init (*this, p.apvts, lpId (layer, LP_SeqRate), "Rate", { "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32" });
+    knobs.add (lpId (layer, LP_SeqLen),   "Length");
+    knobs.add (lpId (layer, LP_SeqGate),  "Gate");
+    knobs.add (lpId (layer, LP_SeqSwing), "Swing");
+    addAndMakeVisible (editor);
+
+    hint.setText ("Hold keys: each active step replays them, transposed by the step pitch. "
+                  "Click / drag Gate to toggle, drag Velocity and Pitch, double-click resets. Follows host tempo.",
+                  juce::dontSendNotification);
+    hint.setColour (juce::Label::textColourId, juce::Colours::grey);
+    addAndMakeVisible (hint);
+}
+
+void SeqPage::resized()
+{
+    auto a = getLocalBounds().reduced (8);
+    auto top = a.removeFromTop (96);
+    auto left = top.removeFromLeft (230);
+    on.button.setBounds (left.removeFromTop (28));
+    left.removeFromTop (8);
+    auto r = left.removeFromTop (28);
+    rate.place (r, 45, 100);
+    knobs.layout (top.removeFromLeft (300), 3);
+    hint.setBounds (a.removeFromBottom (22));
+    a.removeFromBottom (4);
+    editor.setBounds (a);
+}
+
 // ---------------- LayerPage ----------------
 LayerPage::LayerPage (AuraProcessor& p, int layer)
-    : sound (p, layer), mod (p, layer), mseg (p, layer)
+    : sound (p, layer), mod (p, layer), mseg (p, layer), seq (p, layer)
 {
     enable.init (*this, p.apvts, lpId (layer, LP_Enable), "Layer " + juce::String (layer + 1) + " enabled");
     inner.addTab ("Sound", kPanel, &sound, false);
     inner.addTab ("Mod",   kPanel, &mod, false);
     inner.addTab ("MSEG",  kPanel, &mseg, false);
+    inner.addTab ("Seq",   kPanel, &seq, false);
     addAndMakeVisible (inner);
 }
 

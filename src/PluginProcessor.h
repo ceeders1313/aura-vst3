@@ -6,6 +6,7 @@
 #include "engine/Synth.h"
 #include "engine/LayerParams.h"
 #include "engine/Arp.h"
+#include "engine/StepSeq.h"
 #include "fx/Effects.h"
 
 class AuraProcessor : public juce::AudioProcessor
@@ -26,7 +27,7 @@ public:
     bool acceptsMidi() const override  { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 6.0; }
+    double getTailLengthSeconds() const override { return 15.0; }   // reverb jusqu'a 12 s + delay
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -42,6 +43,7 @@ public:
     juce::String getStatusText (int layer) const;
     aura::MsegShape getMseg (int layer, int idx) const;
     void setMseg (int layer, int idx, const aura::MsegShape& s);
+    int getSeqStep (int layer) const { return layers[(size_t) layer].seq.currentStep(); }   // tout thread
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     juce::AudioProcessorValueTreeState apvts;
@@ -63,11 +65,19 @@ private:
         mutable juce::CriticalSection statusLock;
         juce::String status { "No samples loaded" };
 
+        aura::StepSeq seq;
+        juce::MidiBuffer seqMidi;
+
+        // gains du bloc precedent (rampes anti-zipper) : dry L/R, chorus L/R, delay L/R, reverb L/R
+        float gPrev[8] {};
+        bool gInit = false;
+
         bool wasOn = false;
     };
 
     void setStatus (int layer, const juce::String& s);
     void fillParams (int layer, aura::Params& p) const;
+    void fillSeq (int layer, aura::SeqParams& s) const;
 
     struct GlobalPtrs
     {
@@ -92,6 +102,9 @@ private:
     aura::fx::StereoDelay delayFx;
     aura::fx::FdnReverb reverb;
     aura::fx::Limiter limiter;
+
+    float retPrev[3] {}, masterPrev = 1.f;
+    bool globalInit = false;
 
     int bufCap = 0;
     juce::AudioBuffer<float> layerBuf, dryBus, choBus, dlyBus, revBus, fxOut;
