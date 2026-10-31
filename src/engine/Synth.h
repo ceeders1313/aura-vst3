@@ -17,7 +17,7 @@ struct Params
     int   source = 0;          // 0 Synth, 1 Sample, 2 Synth+Sample
     bool  oneShot = false;
 
-    int   wave = 0;            // 0 Saw, 1 Square, 2 Wavetable, 3 FM
+    int   wave = 0;            // 0 Saw, 1 Square, 2 Wavetable, 3 FM, 4 Triangle, 5 Sine
     int   unison = 5;
     float detune = 0.25f;
     float wtPos = 0.f;
@@ -286,7 +286,7 @@ private:
         const bool isFm = (p.wave == 3);
         const float baseDt = freq * std::exp2 (mo.pitch / 12.f) / fs;
         const int u = isFm ? 1 : juce::jlimit (1, kOsc, p.unison);
-        const bool unisonOn = synthOn && ! isFm && ! (p.wave == 2 && ctx.wt == nullptr);
+        const bool unisonOn = synthOn && ! isFm && ! ((p.wave == 2 || p.wave == 5) && ctx.wt == nullptr);
         const bool fmOn = synthOn && isFm && ctx.wt != nullptr;
 
         float dt[kOsc] {}, gl[kOsc] {}, gr[kOsc] {};
@@ -341,6 +341,14 @@ private:
                     if (p.wave == 2)
                     {
                         v = ctx.wt->read (lvl[c], framePos, ph);
+                    }
+                    else if (p.wave == 4)
+                    {
+                        v = 1.f - 4.f * std::abs (ph - 0.5f);          // triangle (harmoniques en 1/n^2)
+                    }
+                    else if (p.wave == 5)
+                    {
+                        v = ctx.wt->sinCycles (ph);
                     }
                     else if (p.wave == 1)
                     {

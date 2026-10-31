@@ -1,7 +1,18 @@
-# AURA v0.6 - nouvelle interface (page par couche, routage en graphe)
+# AURA v0.7 - colonne des couches (Mute/Solo), oscillateurs par type, page FX
 
 ## Build
 GitHub Actions (build.yml inchange). Artefact : AURA-vst3-win64.
+
+## Nouveau en v0.7
+- Couches empilees dans une colonne a gauche : on/off, nom, type, Mute, Solo. L'edition de la couche
+  selectionnee occupe toute la zone centrale jusqu'au bord droit.
+- Oscillateur : choix Source (Synth / Sample / Synth+Sample) puis type de synthe ANALOG / WAVETABLE / FM,
+  chacun avec son panneau : ANALOG = Saw / Square / Triangle / Sine + unison (visuel des voix = Saw+),
+  WAVETABLE = vue 3D des 8 frames + position, FM = schema de l'algorithme, SAMPLE = forme d'onde
+  (zone la plus proche de C4, boucle affichee). Synth+Sample = deux panneaux cote a cote.
+- Nouvelles formes Triangle et Sine (moteur).
+- Mute / Solo (moteur : le gain passe a 0 en rampe, la couche continue de tourner pour garder le timing).
+- Page FX : tous les effets dans une seule fenetre. Routage : les envois sont regroupes dans un seul bloc FX.
 
 ## Nouveau en v0.6 (UI uniquement, moteur inchange)
 - Barre du haut : logo, emplacement preset (browser a venir), pages LAYER / ROUTING / ARP, Output.

@@ -45,6 +45,10 @@ public:
     void setMseg (int layer, int idx, const aura::MsegShape& s);
     int getSeqStep (int layer) const { return layers[(size_t) layer].seq.currentStep(); }   // tout thread
 
+    // Pour les visuels de l'UI (thread message)
+    const aura::WavetableBank& getWavetables() const { return wavetables; }
+    aura::SampleBank::Ptr getUiBank (int layer, int& version) const;
+
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     juce::AudioProcessorValueTreeState apvts;
 
@@ -64,6 +68,8 @@ private:
 
         mutable juce::CriticalSection statusLock;
         juce::String status { "No samples loaded" };
+        aura::SampleBank::Ptr uiBank;     // derniere banque chargee (sous statusLock), pour les visuels
+        int uiBankVersion = 0;
 
         aura::StepSeq seq;
         juce::MidiBuffer seqMidi;

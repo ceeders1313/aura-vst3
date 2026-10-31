@@ -11,8 +11,8 @@ juce::String ui::layerTypeText (APVTS_& s, int layer)
 {
     const int src  = juce::roundToInt (s.getRawParameterValue (lpId (layer, LP_Source))->load());
     const int wave = juce::roundToInt (s.getRawParameterValue (lpId (layer, LP_Wave))->load());
-    static const char* const waves[] = { "SAW", "SQR", "WT", "FM" };
-    const juce::String w (waves[juce::jlimit (0, 3, wave)]);
+    static const char* const waves[] = { "SAW", "SQR", "WT", "FM", "TRI", "SINE" };
+    const juce::String w (waves[juce::jlimit (0, 5, wave)]);
     if (src == 1) return "SMP";
     if (src == 2) return w + "+SMP";
     return w;
@@ -626,22 +626,267 @@ void StepSeqEditor::paint (juce::Graphics& g)
 // ============================================================================
 // Page LAYER
 // ============================================================================
-OscSection::OscSection (AuraProcessor& p, int layerIndex)
-    : Section ("Oscillator / Sample", ui::layerColour (layerIndex)),
-      proc (p), layer (layerIndex), knobs (*this, p.apvts)
+static void setParam (APVTS_& s, const juce::String& id, float value)
 {
-    auto& s = p.apvts;
-    source.init (*this, s, lpId (layer, LP_Source), "Source", { "Synth", "Sample", "Synth+Sample" });
-    wave.init   (*this, s, lpId (layer, LP_Wave), "Wave", { "Saw", "Square", "Wavetable", "FM" });
-    fmAlgo.init (*this, s, lpId (layer, LP_FmAlgo), "FM", { "2-Op", "3-Op Stack", "3-Op Parallel" });
-    oneShot.init (*this, s, lpId (layer, LP_OneShot), "One-shot");
+    if (auto* p = s.getParameter (id))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+        p->endChangeGesture();
+    }
+}
 
+static void styleToggleButton (juce::TextButton& b, juce::Colour c)
+{
+    b.setClickingTogglesState (false);
+    b.setColour (juce::TextButton::buttonOnColourId, c.withAlpha (0.35f));
+    b.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
+}
+
+// ---------------- AnalogPanel ----------------
+static const int kAnalogWaves[4] = { 0, 1, 4, 5 };          // Saw, Square, Triangle, Sine (valeurs du param)
+
+AnalogPanel::AnalogPanel (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex), knobs (*this, p.apvts)
+{
+    static const char* const names[4] = { "SAW", "SQUARE", "TRIANGLE", "SINE" };
+    for (int i = 0; i < 4; ++i)
+    {
+        waveBtn[i].setButtonText (names[i]);
+        styleToggleButton (waveBtn[i], ui::layerColour (layer));
+        waveBtn[i].onClick = [this, i] { setParam (proc.apvts, lpId (layer, LP_Wave), (float) kAnalogWaves[i]); };
+        addAndMakeVisible (waveBtn[i]);
+    }
+    knobs.add (lpId (layer, LP_Unison), "Unison");
+    knobs.add (lpId (layer, LP_Detune), "Detune");
+    waveP = p.apvts.getRawParameterValue (lpId (layer, LP_Wave));
+    uniP  = p.apvts.getRawParameterValue (lpId (layer, LP_Unison));
+    detP  = p.apvts.getRawParameterValue (lpId (layer, LP_Detune));
+    startTimerHz (10);
+}
+
+void AnalogPanel::timerCallback()
+{
+    if (! isShowing()) return;
+    const int w = juce::roundToInt (waveP->load());
+    for (int i = 0; i < 4; ++i) waveBtn[i].setToggleState (w == kAnalogWaves[i], juce::dontSendNotification);
+    repaint();
+}
+
+void AnalogPanel::resized()
+{
+    auto a = getLocalBounds();
+    auto r = a.removeFromTop (24);
+    const int bw = r.getWidth() / 4;
+    for (auto& b : waveBtn) b.setBounds (r.removeFromLeft (bw).reduced (2, 0));
+    a.removeFromTop (6);
+    knobs.layout (a.removeFromRight (std::min (150, a.getWidth() / 3)), 1);
+    a.removeFromRight (6);
+    viewArea = a;
+}
+
+void AnalogPanel::paint (juce::Graphics& g)
+{
+    const auto b = viewArea.toFloat();
+    drawDisplayBg (g, b);
+    auto r = b.reduced (8.f);
+    const int w = juce::roundToInt (waveP->load());
+    const int u = juce::jlimit (1, 7, juce::roundToInt (uniP->load()));
+    const float det = detP->load();
+    const auto col = ui::layerColour (layer);
+
+    auto wave = [w] (float ph)
+    {
+        ph -= std::floor (ph);
+        switch (w)
+        {
+            case 1:  return ph < 0.5f ? 0.8f : -0.8f;
+            case 4:  return (1.f - 4.f * std::abs (ph - 0.5f)) * 0.9f;
+            case 5:  return std::sin (2.f * kPi * ph) * 0.9f;
+            default: return (2.f * ph - 1.f) * 0.9f;
+        }
+    };
+
+    // voix d'unison decalees (visualise le "Saw+" / supersaw)
+    for (int v = u - 1; v >= 0; --v)
+    {
+        const float o = (u > 1) ? (2.f * float (v) / float (u - 1) - 1.f) : 0.f;
+        juce::Path p;
+        const int steps = std::max (2, (int) r.getWidth());
+        for (int i = 0; i <= steps; ++i)
+        {
+            const float t = float (i) / float (steps) * 2.f;              // 2 cycles
+            const float y = r.getCentreY() - wave (t * (1.f + o * det * 0.06f) + o * det * 0.15f) * r.getHeight() * 0.45f;
+            const float x = r.getX() + float (i) / float (steps) * r.getWidth();
+            if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+        }
+        const bool centre = (u == 1) || std::abs (o) < 0.01f || (u % 2 == 0 && v == u / 2);
+        g.setColour (col.withAlpha (centre ? 1.f : 0.3f));
+        g.strokePath (p, juce::PathStrokeType (centre ? 2.f : 1.f));
+    }
+    g.setColour (ui::dim);
+    g.setFont (juce::FontOptions (11.f));
+    g.drawText (u > 1 ? juce::String (u) + " voices unison" : juce::String ("mono"),
+                r.removeFromBottom (14.f), juce::Justification::bottomRight);
+}
+
+// ---------------- WavetablePanel ----------------
+WavetablePanel::WavetablePanel (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex), knobs (*this, p.apvts)
+{
+    knobs.add (lpId (layer, LP_WtPos),  "Position");
+    knobs.add (lpId (layer, LP_Unison), "Unison");
+    knobs.add (lpId (layer, LP_Detune), "Detune");
+    posP = p.apvts.getRawParameterValue (lpId (layer, LP_WtPos));
+    startTimerHz (20);
+}
+
+void WavetablePanel::resized()
+{
+    auto a = getLocalBounds();
+    knobs.layout (a.removeFromRight (std::min (150, a.getWidth() / 3)), 1);
+    a.removeFromRight (6);
+    viewArea = a;
+}
+
+void WavetablePanel::paint (juce::Graphics& g)
+{
+    const auto b = viewArea.toFloat();
+    g.setColour (juce::Colour (0xff0d0f13));
+    g.fillRoundedRectangle (b, 4.f);
+
+    const auto& wt = proc.getWavetables();
+    const int nf = WavetableBank::kFrames;
+    const float framePos = posP->load() * float (nf - 1);
+    const auto col = ui::layerColour (layer);
+
+    // vue pseudo-3D : chaque frame decalee en haut a droite
+    const float dx = b.getWidth() * 0.035f, dy = b.getHeight() * 0.05f;
+    const auto base = juce::Rectangle<float> (b.getX() + 10.f, b.getY() + dy * float (nf - 1) + 8.f,
+                                              b.getWidth() - 20.f - dx * float (nf - 1),
+                                              b.getHeight() - dy * float (nf - 1) - 24.f);
+    auto framePath = [&] (float fp, float offX, float offY)
+    {
+        juce::Path p;
+        const int steps = 160;
+        for (int i = 0; i <= steps; ++i)
+        {
+            const float ph = float (i) / float (steps);
+            const float v = wt.read (0, fp, std::min (ph, 0.9999f));
+            const float x = base.getX() + offX + ph * base.getWidth();
+            const float y = base.getCentreY() - offY - v * base.getHeight() * 0.45f;
+            if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+        }
+        return p;
+    };
+
+    for (int f = nf - 1; f >= 0; --f)
+    {
+        const float a = 0.12f + 0.25f * (1.f - std::min (1.f, std::abs (float (f) - framePos)));
+        g.setColour (col.withAlpha (a));
+        g.strokePath (framePath ((float) f, dx * float (f), dy * float (f)), juce::PathStrokeType (1.f));
+    }
+    g.setColour (col);
+    g.strokePath (framePath (framePos, dx * framePos, dy * framePos), juce::PathStrokeType (2.2f));
+
+    static const char* const names[8] = { "Sine", "Triangle", "Saw", "Square", "Pulse 25%", "Formant", "Organ", "Buzz" };
+    g.setColour (ui::text);
+    g.setFont (juce::FontOptions (12.f));
+    g.drawText ("Frame " + juce::String (framePos + 1.f, 1) + " / " + juce::String (nf) + "  -  "
+                    + names[juce::jlimit (0, nf - 1, juce::roundToInt (framePos))],
+                b.reduced (8.f, 4.f).removeFromBottom (16.f), juce::Justification::centredLeft);
+}
+
+// ---------------- FmPanel ----------------
+FmPanel::FmPanel (AuraProcessor& p, int layerIndex) : layer (layerIndex), knobs (*this, p.apvts)
+{
+    algo.init (*this, p.apvts, lpId (layer, LP_FmAlgo), "Algo", { "2-Op", "3-Op Stack", "3-Op Parallel" });
+    knobs.add (lpId (layer, LP_FmR1),  "Ratio 1");
+    knobs.add (lpId (layer, LP_FmR2),  "Ratio 2");
+    knobs.add (lpId (layer, LP_FmIdx), "Index");
+    knobs.add (lpId (layer, LP_FmFb),  "Feedback");
+    algoP = p.apvts.getRawParameterValue (lpId (layer, LP_FmAlgo));
+    r1P = p.apvts.getRawParameterValue (lpId (layer, LP_FmR1));
+    r2P = p.apvts.getRawParameterValue (lpId (layer, LP_FmR2));
+    startTimerHz (5);
+}
+
+void FmPanel::resized()
+{
+    auto a = getLocalBounds();
+    auto r = a.removeFromTop (24);
+    algo.place (r, 40, std::min (150, r.getWidth() - 48));
+    a.removeFromTop (6);
+    knobs.layout (a.removeFromRight (std::min (220, a.getWidth() / 2)), 2);
+    a.removeFromRight (6);
+    viewArea = a;
+}
+
+void FmPanel::paint (juce::Graphics& g)
+{
+    const auto b = viewArea.toFloat();
+    g.setColour (juce::Colour (0xff0d0f13));
+    g.fillRoundedRectangle (b, 4.f);
+    const auto col = ui::layerColour (layer);
+    const int al = juce::roundToInt (algoP->load());
+
+    const float bw = std::min (90.f, b.getWidth() * 0.3f), bh = 30.f;
+    auto box = [&] (juce::Rectangle<float> r, const juce::String& t, bool carrier)
+    {
+        g.setColour (carrier ? col.withAlpha (0.35f) : ui::panel2);
+        g.fillRoundedRectangle (r, 4.f);
+        g.setColour (carrier ? col : ui::outline.brighter (0.3f));
+        g.drawRoundedRectangle (r, 4.f, 1.5f);
+        g.setColour (ui::text);
+        g.setFont (juce::FontOptions (12.f));
+        g.drawText (t, r, juce::Justification::centred);
+    };
+    auto arrow = [&] (juce::Point<float> a, juce::Point<float> c)
+    {
+        juce::Path p;
+        p.addArrow ({ a, c }, 1.5f, 8.f, 8.f);
+        g.setColour (ui::dim);
+        g.fillPath (p);
+    };
+
+    const float cx = b.getCentreX();
+    const auto carrier = juce::Rectangle<float> (cx - bw / 2, b.getBottom() - bh - 14.f, bw, bh);
+    const juce::String m1 = "Op 1  x" + juce::String (r1P->load(), 2);
+    const juce::String m2 = "Op 2  x" + juce::String (r2P->load(), 2);
+
+    if (al == 1)          // pile : Op2 -> Op1 -> porteuse
+    {
+        const auto o1 = carrier.translated (0.f, -(bh + 18.f));
+        const auto o2 = o1.translated (0.f, -(bh + 18.f));
+        box (o2, m2, false); box (o1, m1, false);
+        arrow ({ cx, o2.getBottom() }, { cx, o1.getY() });
+        arrow ({ cx, o1.getBottom() }, { cx, carrier.getY() });
+    }
+    else if (al == 2)     // parallele : Op1 + Op2 -> porteuse
+    {
+        const auto o1 = carrier.translated (-(bw * 0.6f), -(bh + 30.f));
+        const auto o2 = carrier.translated (bw * 0.6f, -(bh + 30.f));
+        box (o1, m1, false); box (o2, m2, false);
+        arrow ({ o1.getCentreX(), o1.getBottom() }, { cx - 10.f, carrier.getY() });
+        arrow ({ o2.getCentreX(), o2.getBottom() }, { cx + 10.f, carrier.getY() });
+    }
+    else                  // 2-Op : Op1 -> porteuse
+    {
+        const auto o1 = carrier.translated (0.f, -(bh + 26.f));
+        box (o1, m1, false);
+        arrow ({ cx, o1.getBottom() }, { cx, carrier.getY() });
+    }
+    box (carrier, "Carrier", true);
+}
+
+// ---------------- SamplePanel ----------------
+SamplePanel::SamplePanel (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
+{
+    oneShot.init (*this, p.apvts, lpId (layer, LP_OneShot), "One-shot");
     addAndMakeVisible (loadButton);
     loadButton.onClick = [this]
     {
         chooser = std::make_unique<juce::FileChooser> ("Select samples", juce::File(),
                                                        "*.wav;*.aif;*.aiff;*.flac");
-        juce::Component::SafePointer<OscSection> safe (this);
+        juce::Component::SafePointer<SamplePanel> safe (this);
         chooser->launchAsync (juce::FileBrowserComponent::openMode
                               | juce::FileBrowserComponent::canSelectFiles
                               | juce::FileBrowserComponent::canSelectMultipleItems,
@@ -653,53 +898,208 @@ OscSection::OscSection (AuraProcessor& p, int layerIndex)
                                   if (! files.isEmpty()) safe->loadFiles (files);
                               });
     };
-
-    statusLabel.setText (proc.getStatusText (layer), juce::dontSendNotification);
     statusLabel.setColour (juce::Label::textColourId, ui::dim);
     statusLabel.setFont (juce::FontOptions (12.f));
     addAndMakeVisible (statusLabel);
-
-    knobs.add (lpId (layer, LP_Unison), "Unison");
-    knobs.add (lpId (layer, LP_Detune), "Detune");
-    knobs.add (lpId (layer, LP_WtPos),  "WT Pos");
-    knobs.add (lpId (layer, LP_FmR1),   "FM Ratio 1");
-    knobs.add (lpId (layer, LP_FmR2),   "FM Ratio 2");
-    knobs.add (lpId (layer, LP_FmIdx),  "FM Index");
-    knobs.add (lpId (layer, LP_FmFb),   "FM Fdbk");
-
     startTimerHz (4);
 }
 
-void OscSection::loadFiles (const juce::Array<juce::File>& files)
+void SamplePanel::loadFiles (const juce::Array<juce::File>& files)
 {
     proc.loadSamples (layer, files);
-    if (source.box.getSelectedId() == 1) source.box.setSelectedId (2);
+    if (juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, LP_Source))->load()) == 0)
+        setParam (proc.apvts, lpId (layer, LP_Source), 1.f);
+}
+
+void SamplePanel::timerCallback()
+{
+    statusLabel.setText (proc.getStatusText (layer), juce::dontSendNotification);
+    int v = 0;
+    auto b = proc.getUiBank (layer, v);
+    if (v != bankVersion)
+    {
+        bankVersion = v;
+        bank = b;
+        rebuild();
+        repaint();
+    }
+}
+
+void SamplePanel::rebuild()
+{
+    mins.clear(); maxs.clear(); info.clear();
+    loopS = loopE = -1.f;
+    if (bank == nullptr || bank->zones.empty()) return;
+
+    const Zone* z = &bank->zones.front();
+    for (const auto& zz : bank->zones)
+        if (std::abs (zz.rootKey - 60) < std::abs (z->rootKey - 60)) z = &zz;
+
+    const int len = z->data.getNumSamples();
+    if (len <= 0) return;
+    const int nb = 512;
+    mins.assign (nb, 0.f);
+    maxs.assign (nb, 0.f);
+    const float* l = z->data.getReadPointer (0);
+    const float* r = z->data.getReadPointer (1);
+    for (int i = 0; i < nb; ++i)
+    {
+        const int s0 = int ((long long) i * len / nb), s1 = std::max (s0 + 1, int ((long long) (i + 1) * len / nb));
+        float mn = 1.f, mx = -1.f;
+        for (int s = s0; s < s1 && s < len; ++s)
+        {
+            const float v = 0.5f * (l[s] + r[s]);
+            mn = std::min (mn, v);
+            mx = std::max (mx, v);
+        }
+        mins[(size_t) i] = mn;
+        maxs[(size_t) i] = mx;
+    }
+    if (z->hasLoop())
+    {
+        loopS = float (z->loopStart) / float (len);
+        loopE = float (z->loopEnd) / float (len);
+    }
+    info = juce::String ((int) bank->zones.size()) + " zone(s)  -  shown: " + z->name + "  (root "
+         + juce::MidiMessage::getMidiNoteName (z->rootKey, true, true, 4) + ", "
+         + juce::String (double (len) / z->srcRate, 2) + " s)";
+}
+
+void SamplePanel::resized()
+{
+    auto a = getLocalBounds();
+    auto r = a.removeFromTop (24);
+    loadButton.setBounds (r.removeFromLeft (130));
+    r.removeFromLeft (8);
+    oneShot.button.setBounds (r.removeFromLeft (95));
+    r.removeFromLeft (8);
+    statusLabel.setBounds (r);
+    a.removeFromTop (6);
+    viewArea = a;
+}
+
+void SamplePanel::paint (juce::Graphics& g)
+{
+    const auto b = viewArea.toFloat();
+    drawDisplayBg (g, b);
+    const auto col = ui::layerColour (layer);
+
+    if (mins.empty())
+    {
+        g.setColour (ui::dim);
+        g.setFont (juce::FontOptions (13.f));
+        g.drawText ("Drop samples here or click 'Load samples...'", b, juce::Justification::centred);
+        return;
+    }
+
+    const auto r = b.reduced (6.f).withTrimmedBottom (16.f);
+    if (loopS >= 0.f)
+    {
+        g.setColour (col.withAlpha (0.12f));
+        g.fillRect (r.getX() + loopS * r.getWidth(), r.getY(), (loopE - loopS) * r.getWidth(), r.getHeight());
+        g.setColour (col.withAlpha (0.7f));
+        g.drawVerticalLine ((int) (r.getX() + loopS * r.getWidth()), r.getY(), r.getBottom());
+        g.drawVerticalLine ((int) (r.getX() + loopE * r.getWidth()), r.getY(), r.getBottom());
+    }
+    g.setColour (col.withAlpha (0.85f));
+    const int nb = (int) mins.size();
+    const float bwid = r.getWidth() / float (nb);
+    for (int i = 0; i < nb; ++i)
+    {
+        const float y0 = r.getCentreY() - maxs[(size_t) i] * r.getHeight() * 0.5f;
+        const float y1 = r.getCentreY() - mins[(size_t) i] * r.getHeight() * 0.5f;
+        g.fillRect (r.getX() + float (i) * bwid, y0, std::max (1.f, bwid), std::max (1.f, y1 - y0));
+    }
+    g.setColour (ui::dim);
+    g.setFont (juce::FontOptions (11.f));
+    g.drawText (info, b.reduced (8.f, 2.f).removeFromBottom (16.f), juce::Justification::centredLeft);
+}
+
+// ---------------- OscSection ----------------
+OscSection::OscSection (AuraProcessor& p, int layerIndex)
+    : Section ("Oscillator", ui::layerColour (layerIndex)), proc (p), layer (layerIndex),
+      analog (p, layerIndex), wavetable (p, layerIndex), fm (p, layerIndex), sample (p, layerIndex)
+{
+    source.init (*this, p.apvts, lpId (layer, LP_Source), "Source", { "Synth", "Sample", "Synth+Sample" });
+
+    static const char* const names[kNumTypes] = { "ANALOG", "WAVETABLE", "FM" };
+    for (int i = 0; i < kNumTypes; ++i)
+    {
+        typeBtn[i].setButtonText (names[i]);
+        styleToggleButton (typeBtn[i], ui::layerColour (layer));
+        typeBtn[i].onClick = [this, i]
+        {
+            const float w = (i == TypeWavetable) ? 2.f : (i == TypeFm ? 3.f : (float) lastAnalogWave);
+            setParam (proc.apvts, lpId (layer, LP_Wave), w);
+        };
+        addAndMakeVisible (typeBtn[i]);
+    }
+    addChildComponent (analog);
+    addChildComponent (wavetable);
+    addChildComponent (fm);
+    addChildComponent (sample);
+    startTimerHz (8);
+    timerCallback();
+}
+
+int OscSection::currentSource() const
+{
+    return juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, LP_Source))->load());
+}
+
+int OscSection::currentType() const
+{
+    const int w = juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, LP_Wave))->load());
+    return w == 2 ? TypeWavetable : (w == 3 ? TypeFm : TypeAnalog);
 }
 
 void OscSection::timerCallback()
 {
-    statusLabel.setText (proc.getStatusText (layer), juce::dontSendNotification);
+    const int w = juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, LP_Wave))->load());
+    if (w != 2 && w != 3) lastAnalogWave = w;
+
+    const int src = currentSource(), type = currentType();
+    if (src == lastSrc && type == lastType) return;
+    lastSrc = src;
+    lastType = type;
+
+    const bool synth = src != 1;
+    for (int i = 0; i < kNumTypes; ++i)
+    {
+        typeBtn[i].setToggleState (i == type, juce::dontSendNotification);
+        typeBtn[i].setVisible (synth);
+    }
+    analog.setVisible (synth && type == TypeAnalog);
+    wavetable.setVisible (synth && type == TypeWavetable);
+    fm.setVisible (synth && type == TypeFm);
+    sample.setVisible (src >= 1);
+    resized();
 }
 
 void OscSection::resized()
 {
     auto a = content();
-    auto r1 = a.removeFromTop (26);
-    const int bw = std::max (80, (r1.getWidth() - 3 * 52) / 3 - 8);
-    source.place (r1, 52, bw);
-    wave.place (r1, 52, bw);
-    fmAlgo.place (r1, 52, bw);
+    auto r = a.removeFromTop (26);
+    source.place (r, 52, 130);
+    r.removeFromLeft (10);
+    for (auto& b : typeBtn) b.setBounds (r.removeFromLeft (96).reduced (2, 0));
+    a.removeFromTop (8);
 
-    a.removeFromTop (6);
-    auto r2 = a.removeFromTop (26);
-    loadButton.setBounds (r2.removeFromLeft (130));
-    r2.removeFromLeft (8);
-    oneShot.button.setBounds (r2.removeFromLeft (95));
-    r2.removeFromLeft (8);
-    statusLabel.setBounds (r2);
-
-    a.removeFromTop (6);
-    knobs.layout (a, 7);
+    const int src = lastSrc;
+    if (src == 2)
+    {
+        auto left = a.removeFromLeft (a.getWidth() * 55 / 100);
+        a.removeFromLeft (10);
+        for (juce::Component* c : { (juce::Component*) &analog, (juce::Component*) &wavetable, (juce::Component*) &fm })
+            c->setBounds (left);
+        sample.setBounds (a);
+    }
+    else
+    {
+        for (juce::Component* c : { (juce::Component*) &analog, (juce::Component*) &wavetable,
+                                    (juce::Component*) &fm, (juce::Component*) &sample })
+            c->setBounds (a);
+    }
 }
 
 FilterSection::FilterSection (AuraProcessor& p, int layer)
@@ -714,7 +1114,7 @@ FilterSection::FilterSection (AuraProcessor& p, int layer)
 void FilterSection::resized()
 {
     auto a = content();
-    view.setBounds (a.removeFromTop (a.getHeight() * 55 / 100));
+    view.setBounds (a.removeFromTop (a.getHeight() * 50 / 100));
     a.removeFromTop (4);
     knobs.layout (a, 2);
 }
@@ -735,9 +1135,9 @@ AmpSection::AmpSection (AuraProcessor& p, int layer)
 void AmpSection::resized()
 {
     auto a = content();
-    view.setBounds (a.removeFromTop (a.getHeight() * 45 / 100));
+    view.setBounds (a.removeFromTop (a.getHeight() * 38 / 100));
     a.removeFromTop (4);
-    knobs.layout (a, 6);
+    knobs.layout (a, 3);
 }
 
 EnvPane::EnvPane (AuraProcessor& p, int layer)
@@ -957,10 +1357,10 @@ LayerEditor::LayerEditor (AuraProcessor& p, int layer)
 void LayerEditor::resized()
 {
     auto a = getLocalBounds();
-    auto top = a.removeFromTop (a.getHeight() * 38 / 100);
+    auto top = a.removeFromTop (a.getHeight() * 44 / 100);
     auto bottom = a.removeFromBottom (122);
 
-    osc.setBounds (top.removeFromLeft (top.getWidth() * 42 / 100).reduced (4));
+    osc.setBounds (top.removeFromLeft (top.getWidth() * 50 / 100).reduced (4));
     filter.setBounds (top.removeFromLeft (top.getWidth() * 40 / 100).reduced (4));
     amp.setBounds (top.reduced (4));
 
@@ -1053,28 +1453,88 @@ void LayerNode::paint (juce::Graphics& g)
     }
 }
 
-FxNode::FxNode (APVTS_& s, const juce::String& t, const juce::String& retId, juce::Colour c)
-    : colour (c), title (t)
+juce::Colour FxBlockNode::rowColour (int i)
 {
-    setupMiniKnob (ret, c);
-    addAndMakeVisible (ret);
-    retA = std::make_unique<APVTS_::SliderAttachment> (s, retId, ret);
+    static const juce::uint32 c[kFx] = { 0xff9575cd, 0xff4db6ac, 0xff7986cb };
+    return juce::Colour (c[juce::jlimit (0, kFx - 1, i)]);
 }
 
-void FxNode::resized()
+const char* FxBlockNode::rowName (int i)
 {
-    ret.setBounds (getWidth() - 44, getHeight() / 2 - 16, 36, 36);
+    static const char* const n[kFx] = { "Chorus", "Delay", "Reverb" };
+    return n[juce::jlimit (0, kFx - 1, i)];
 }
 
-void FxNode::paint (juce::Graphics& g)
+FxBlockNode::FxBlockNode (APVTS_& s)
 {
-    paintNodeBox (g, getLocalBounds().toFloat(), colour, selected);
+    static const char* const retIds[kFx] = { "choRet", "dlyRet", "revRet" };
+    for (int i = 0; i < kFx; ++i)
+    {
+        setupMiniKnob (ret[i], rowColour (i));
+        addAndMakeVisible (ret[i]);
+        retA[i] = std::make_unique<APVTS_::SliderAttachment> (s, retIds[i], ret[i]);
+    }
+}
+
+juce::Rectangle<int> FxBlockNode::rowBounds (int i) const
+{
+    const int top = 30, h = (getHeight() - top - 8) / kFx;
+    return { 8, top + i * h, getWidth() - 16, h - 4 };
+}
+
+juce::Point<float> FxBlockNode::inlet (int i) const
+{
+    return { float (getX() + getWidth() * (i + 1) / (kFx + 1)), (float) getY() };
+}
+
+juce::Point<float> FxBlockNode::outlet (int i) const
+{
+    return { float (getX() + getWidth() * (i + 1) / (kFx + 1)), (float) getBottom() };
+}
+
+void FxBlockNode::resized()
+{
+    for (int i = 0; i < kFx; ++i)
+    {
+        const auto r = rowBounds (i);
+        ret[i].setBounds (r.getRight() - r.getHeight(), r.getY(), r.getHeight(), r.getHeight());
+    }
+}
+
+void FxBlockNode::mouseDown (const juce::MouseEvent& e)
+{
+    for (int i = 0; i < kFx; ++i)
+        if (rowBounds (i).contains (e.getPosition())) { if (onSelect) onSelect (i); return; }
+    if (onSelect) onSelect (0);
+}
+
+void FxBlockNode::paint (juce::Graphics& g)
+{
+    paintNodeBox (g, getLocalBounds().toFloat(), ui::accent.withAlpha (0.7f), false);
     g.setColour (ui::text);
     g.setFont (juce::FontOptions (13.f, juce::Font::bold));
-    g.drawText (title, 10, 8, getWidth() - 56, 20, juce::Justification::centredLeft);
-    g.setColour (ui::dim);
-    g.setFont (juce::FontOptions (11.f));
-    g.drawText ("Return", 10, 30, getWidth() - 56, 16, juce::Justification::centredLeft);
+    g.drawText ("FX (sends)", 10, 6, getWidth() - 20, 20, juce::Justification::centredLeft);
+
+    for (int i = 0; i < kFx; ++i)
+    {
+        const auto r = rowBounds (i).toFloat();
+        const auto c = rowColour (i);
+        g.setColour (ui::panel);
+        g.fillRoundedRectangle (r, 3.f);
+        if (selectedRow == i)
+        {
+            g.setColour (juce::Colours::white);
+            g.drawRoundedRectangle (r, 3.f, 1.5f);
+        }
+        g.setColour (c);
+        g.fillRect (r.withWidth (3.f));
+        g.setColour (ui::text);
+        g.setFont (juce::FontOptions (12.f));
+        g.drawText (rowName (i), r.withTrimmedLeft (10.f), juce::Justification::centredLeft);
+        g.setColour (ui::dim);
+        g.setFont (juce::FontOptions (10.f));
+        g.drawText ("return", r.withTrimmedRight (r.getHeight() + 4.f), juce::Justification::centredRight);
+    }
 }
 
 MasterNode::MasterNode (APVTS_& s)
@@ -1115,7 +1575,7 @@ void MasterNode::paint (juce::Graphics& g)
     item ("Limiter", limOn->load() > 0.5f, 74);
 }
 
-RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p), master (p.apvts)
+RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p), fxBlock (p.apvts), master (p.apvts)
 {
     for (int l = 0; l < kLayers; ++l)
     {
@@ -1126,18 +1586,8 @@ RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p), master (p.apvts)
         layerNodes.push_back (std::move (n));
     }
 
-    struct FxDef { const char* title; const char* ret; juce::uint32 col; };
-    static const FxDef defs[kFx] = { { "Chorus", "choRet", 0xff9575cd },
-                                     { "Delay",  "dlyRet", 0xff4db6ac },
-                                     { "Reverb", "revRet", 0xff7986cb } };
-    for (int i = 0; i < kFx; ++i)
-    {
-        auto n = std::make_unique<FxNode> (p.apvts, defs[i].title, defs[i].ret, juce::Colour (defs[i].col));
-        n->onSelect = [this, i] { if (onSelect) onSelect (kLayers + i); };
-        addAndMakeVisible (*n);
-        fxNodes.push_back (std::move (n));
-    }
-
+    fxBlock.onSelect = [this] (int i) { if (onSelect) onSelect (kLayers + i); };
+    addAndMakeVisible (fxBlock);
     master.onSelect = [this] { if (onSelect) onSelect (masterIndex()); };
     addAndMakeVisible (master);
     startTimerHz (10);
@@ -1146,10 +1596,10 @@ RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p), master (p.apvts)
 void RoutingGraph::setSelected (int idx)
 {
     for (int l = 0; l < kLayers; ++l) layerNodes[(size_t) l]->selected = (idx == l);
-    for (int i = 0; i < kFx; ++i) fxNodes[(size_t) i]->selected = (idx == kLayers + i);
+    fxBlock.selectedRow = (idx >= kLayers && idx < kLayers + kFx) ? idx - kLayers : -1;
     master.selected = (idx == masterIndex());
     for (auto& n : layerNodes) n->repaint();
-    for (auto& n : fxNodes) n->repaint();
+    fxBlock.repaint();
     master.repaint();
 }
 
@@ -1161,14 +1611,13 @@ void RoutingGraph::resized()
     for (int l = 0; l < kLayers; ++l)
         layerNodes[(size_t) l]->setBounds (gap + l * (nodeW + gap), 24, nodeW, nodeH);
 
-    const int fxW = 150, fxH = 58, fxY = h * 46 / 100 - fxH / 2;
-    const int fxGap = (w - kFx * fxW) / (kFx + 1);
-    for (int i = 0; i < kFx; ++i)
-        fxNodes[(size_t) i]->setBounds (fxGap + i * (fxW + fxGap), fxY, fxW, fxH);
+    // FX a droite du centre, master au centre en bas : les cables dry passent a gauche du bloc FX
+    const int fxW = 230, fxH = 150;
+    fxBlock.setBounds (w * 62 / 100 - fxW / 2, h * 44 / 100 - fxH / 2, fxW, fxH);
 
     const int mW = 220, mH = 100;
-    master.setBounds (w / 2 - mW / 2, h * 72 / 100 - mH / 2, mW, mH);
-    outBox = juce::Rectangle<int> (w / 2 - 40, master.getBottom() + 28, 80, 26);
+    master.setBounds (w / 2 - mW / 2, h * 74 / 100 - mH / 2, mW, mH);
+    outBox = juce::Rectangle<int> (w / 2 - 40, master.getBottom() + 26, 80, 26);
 }
 
 static void drawWire (juce::Graphics& g, juce::Point<float> a, juce::Point<float> b, juce::Colour c, float amount)
@@ -1203,19 +1652,20 @@ void RoutingGraph::paint (juce::Graphics& g)
 
         const int sendIds[kFx] = { LP_SendCho, LP_SendDly, LP_SendRev };
         for (int i = 0; i < kFx; ++i)
-        {
-            const auto& fb = fxNodes[(size_t) i]->getBounds();
-            drawWire (g, out, { (float) fb.getCentreX(), (float) fb.getY() }, fxNodes[(size_t) i]->colour,
-                      raw (lpId (l, sendIds[i])) * level);
-        }
+            drawWire (g, out, fxBlock.inlet (i), FxBlockNode::rowColour (i), raw (lpId (l, sendIds[i])) * level);
     }
 
     static const char* const retIds[kFx] = { "choRet", "dlyRet", "revRet" };
     for (int i = 0; i < kFx; ++i)
+        drawWire (g, fxBlock.outlet (i), mIn, FxBlockNode::rowColour (i), raw (retIds[i]));
+
+    // ports d'entree / sortie du bloc FX
+    for (int i = 0; i < kFx; ++i)
     {
-        const auto& fb = fxNodes[(size_t) i]->getBounds();
-        drawWire (g, { (float) fb.getCentreX(), (float) fb.getBottom() }, mIn, fxNodes[(size_t) i]->colour,
-                  raw (retIds[i]));
+        g.setColour (FxBlockNode::rowColour (i));
+        const auto a = fxBlock.inlet (i), b = fxBlock.outlet (i);
+        g.fillEllipse (a.x - 4.f, a.y - 4.f, 8.f, 8.f);
+        g.fillEllipse (b.x - 4.f, b.y - 4.f, 8.f, 8.f);
     }
 
     drawWire (g, { (float) master.getBounds().getCentreX(), (float) master.getBottom() },
@@ -1316,6 +1766,67 @@ void RoutingPage::resized()
 }
 
 // ============================================================================
+// Page FX
+// ============================================================================
+FxPage::FxPage (AuraProcessor& p)
+{
+    auto& s = p.apvts;
+    auto add = [&] (const juce::String& t, juce::Colour c, int cols)
+    {
+        panels.push_back (std::make_unique<ParamPanel> (s, t, c, cols));
+        addAndMakeVisible (*panels.back());
+        return panels.back().get();
+    };
+
+    auto* cho = add ("Chorus (send)", FxBlockNode::rowColour (0), 3);
+    cho->addKnob ("choRate", "Rate");
+    cho->addKnob ("choDepth", "Depth");
+    cho->addKnob ("choRet", "Return");
+
+    auto* dly = add ("Delay (send)", FxBlockNode::rowColour (1), 4);
+    dly->addToggle ("dlyPing", "Ping-pong");
+    dly->addKnob ("dlyTime", "Time (ms)");
+    dly->addKnob ("dlyFb", "Feedback");
+    dly->addKnob ("dlyDamp", "Damping");
+    dly->addKnob ("dlyRet", "Return");
+
+    auto* rev = add ("Reverb (send)", FxBlockNode::rowColour (2), 5);
+    rev->addKnob ("revDecay", "Decay (s)");
+    rev->addKnob ("revSize", "Size");
+    rev->addKnob ("revDamp", "Damping");
+    rev->addKnob ("revPre", "Pre-delay");
+    rev->addKnob ("revRet", "Return");
+
+    auto* sat = add ("Saturation (master)", ui::accent, 2);
+    sat->addToggle ("satOn", "On");
+    sat->addCombo ("satMode", "Mode", { "Tanh", "Hard Clip", "Asymmetric" });
+    sat->addKnob ("satDrive", "Drive (dB)");
+    sat->addKnob ("satMix", "Mix");
+
+    auto* lim = add ("Limiter (master)", ui::accent, 2);
+    lim->addToggle ("limOn", "On");
+    lim->addKnob ("limCeil", "Ceiling (dB)");
+    lim->addKnob ("limRel", "Release (ms)");
+
+    auto* mst = add ("Master", ui::accent, 1);
+    mst->addKnob ("master", "Output");
+}
+
+void FxPage::resized()
+{
+    auto a = getLocalBounds();
+    auto row1 = a.removeFromTop (a.getHeight() / 2);
+    const int w1 = row1.getWidth();
+    panels[0]->setBounds (row1.removeFromLeft (w1 * 28 / 100).reduced (4));
+    panels[1]->setBounds (row1.removeFromLeft (w1 * 34 / 100).reduced (4));
+    panels[2]->setBounds (row1.reduced (4));
+    const int w2 = a.getWidth();
+    panels[3]->setBounds (a.removeFromLeft (w2 * 40 / 100).reduced (4));
+    panels[4]->setBounds (a.removeFromLeft (w2 * 35 / 100).reduced (4));
+    panels[5]->setBounds (a.reduced (4));
+}
+
+// ============================================================================
 // Page ARP
 // ============================================================================
 ArpPage::ArpPage (AuraProcessor& p) : Section ("Arpeggiator (global)"), knobs (*this, p.apvts)
@@ -1354,51 +1865,70 @@ void ArpPage::resized()
 }
 
 // ============================================================================
-// Bandeau des couches
+// Colonne des couches
 // ============================================================================
-LayerTab::LayerTab (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
+LayerRow::LayerRow (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
 {
     addAndMakeVisible (power);
     powerA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Enable), power);
+
+    mute.setClickingTogglesState (true);
+    solo.setClickingTogglesState (true);
+    mute.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffe57373));
+    solo.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffffd54f));
+    mute.setColour (juce::TextButton::textColourOnId, ui::bg);
+    solo.setColour (juce::TextButton::textColourOnId, ui::bg);
+    mute.setTooltip ("Mute");
+    solo.setTooltip ("Solo");
+    addAndMakeVisible (mute);
+    addAndMakeVisible (solo);
+    muteA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Mute), mute);
+    soloA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Solo), solo);
     startTimerHz (4);
 }
 
-void LayerTab::resized()
+void LayerRow::resized()
 {
-    power.setBounds (6, getHeight() / 2 - 11, 24, 22);
+    power.setBounds (8, 10, 24, 22);
+    const int bs = 26, y = getHeight() / 2 - bs / 2;
+    solo.setBounds (getWidth() - bs - 8, y, bs, bs);
+    mute.setBounds (getWidth() - 2 * bs - 12, y, bs, bs);
 }
 
-void LayerTab::paint (juce::Graphics& g)
+void LayerRow::paint (juce::Graphics& g)
 {
-    auto b = getLocalBounds().toFloat().reduced (2.f, 0.f);
+    auto b = getLocalBounds().toFloat().reduced (0.f, 2.f);
     const auto c = ui::layerColour (layer);
     g.setColour (selected ? ui::panel2 : ui::panel);
-    g.fillRoundedRectangle (b, 4.f);
+    g.fillRoundedRectangle (b, 5.f);
+    g.setColour (c.withAlpha (selected ? 1.f : 0.5f));
+    g.fillRoundedRectangle (b.removeFromLeft (4.f), 2.f);
     if (selected)
     {
-        g.setColour (c);
-        g.fillRect (b.removeFromBottom (3.f));
+        g.setColour (c.withAlpha (0.6f));
+        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f, 2.5f), 5.f, 1.f);
     }
+
     const bool on = proc.apvts.getRawParameterValue (lpId (layer, LP_Enable))->load() > 0.5f;
+    const int textW = getWidth() - 40 - 66;
     g.setColour (on ? (selected ? c : ui::text) : ui::dim);
     g.setFont (juce::FontOptions (14.f, juce::Font::bold));
-    g.drawText (juce::String (layer + 1) + " - Layer " + juce::String (layer + 1),
-                34, 0, getWidth() - 100, getHeight(), juce::Justification::centredLeft);
+    g.drawText (juce::String (layer + 1) + " - Layer " + juce::String (layer + 1), 38, 8, textW, 22,
+                juce::Justification::centredLeft);
     g.setColour (ui::dim);
     g.setFont (juce::FontOptions (11.f));
-    g.drawText (ui::layerTypeText (proc.apvts, layer), getWidth() - 74, 0, 66, getHeight(),
-                juce::Justification::centredRight);
+    g.drawText (ui::layerTypeText (proc.apvts, layer), 38, 30, textW, 16, juce::Justification::centredLeft);
 }
 
 // ============================================================================
 // Editeur principal
 // ============================================================================
 AuraEditor::AuraEditor (AuraProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), routing (p), arpPage (p)
+    : AudioProcessorEditor (&p), proc (p), routing (p), fxPage (p), arpPage (p)
 {
     setLookAndFeel (&look);
 
-    static const char* const names[kNumPages] = { "LAYER", "ROUTING", "ARP" };
+    static const char* const names[kNumPages] = { "LAYER", "ROUTING", "FX", "ARP" };
     for (int i = 0; i < kNumPages; ++i)
     {
         nav[i].setButtonText (names[i]);
@@ -1419,15 +1949,16 @@ AuraEditor::AuraEditor (AuraProcessor& p)
 
     for (int l = 0; l < kLayers; ++l)
     {
-        auto t = std::make_unique<LayerTab> (p, l);
-        t->onSelect = [this, l] { selectLayer (l); showPage (PageLayer); };
-        addAndMakeVisible (*t);
-        tabs.push_back (std::move (t));
+        auto r = std::make_unique<LayerRow> (p, l);
+        r->onSelect = [this, l] { selectLayer (l); showPage (PageLayer); };
+        addAndMakeVisible (*r);
+        rows.push_back (std::move (r));
 
         layerEditors.push_back (std::make_unique<LayerEditor> (p, l));
         addChildComponent (*layerEditors.back());
     }
     addChildComponent (routing);
+    addChildComponent (fxPage);
     addChildComponent (arpPage);
     routing.onEditLayer = [this] (int l) { selectLayer (l); showPage (PageLayer); };
 
@@ -1449,8 +1980,8 @@ void AuraEditor::selectLayer (int l)
     currentLayer = juce::jlimit (0, kLayers - 1, l);
     for (int i = 0; i < kLayers; ++i)
     {
-        tabs[(size_t) i]->selected = (i == currentLayer);
-        tabs[(size_t) i]->repaint();
+        rows[(size_t) i]->selected = (i == currentLayer);
+        rows[(size_t) i]->repaint();
     }
     showPage (page);
 }
@@ -1462,6 +1993,7 @@ void AuraEditor::showPage (int p)
     for (int i = 0; i < kLayers; ++i)
         layerEditors[(size_t) i]->setVisible (page == PageLayer && i == currentLayer);
     routing.setVisible (page == PageRouting);
+    fxPage.setVisible (page == PageFx);
     arpPage.setVisible (page == PageArp);
     if (page == PageRouting) routing.select (currentLayer);
 }
@@ -1523,12 +2055,17 @@ void AuraEditor::resized()
         nav[i].setBounds (top.removeFromRight (96).reduced (3, 10));
     }
 
-    auto strip = a.removeFromTop (42).reduced (6, 4);
-    const int tw = std::min (260, strip.getWidth() / kLayers);
-    for (auto& t : tabs) t->setBounds (strip.removeFromLeft (tw));
+    // colonne des couches a gauche, edition de la centrale jusqu'au bord droit
+    auto column = a.removeFromLeft (230).reduced (6, 8);
+    for (auto& r : rows)
+    {
+        r->setBounds (column.removeFromTop (58));
+        column.removeFromTop (4);
+    }
 
-    const auto pageArea = a.reduced (6);
+    const auto pageArea = a.reduced (4, 6);
     for (auto& e : layerEditors) e->setBounds (pageArea);
     routing.setBounds (pageArea);
+    fxPage.setBounds (pageArea);
     arpPage.setBounds (pageArea.withHeight (std::min (pageArea.getHeight(), 320)));
 }

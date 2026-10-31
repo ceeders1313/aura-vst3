@@ -227,24 +227,104 @@ private:
 // ============================================================================
 // Page LAYER : sections
 // ============================================================================
-class OscSection : public Section, private juce::Timer
+// Synthe analogique : Saw / Square / Triangle / Sine + unison (Saw+ = Saw avec unison)
+class AnalogPanel : public juce::Component, private juce::Timer
 {
 public:
-    OscSection (AuraProcessor&, int layer);
+    AnalogPanel (AuraProcessor&, int layer);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    void timerCallback() override;
+    AuraProcessor& proc;
+    int layer;
+    juce::TextButton waveBtn[4];
+    KnobSet knobs;
+    juce::Rectangle<int> viewArea;
+    std::atomic<float> *waveP, *uniP, *detP;
+};
+
+class WavetablePanel : public juce::Component, private juce::Timer
+{
+public:
+    WavetablePanel (AuraProcessor&, int layer);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    void timerCallback() override { if (isShowing()) repaint(); }
+    AuraProcessor& proc;
+    int layer;
+    KnobSet knobs;
+    juce::Rectangle<int> viewArea;
+    std::atomic<float>* posP;
+};
+
+class FmPanel : public juce::Component, private juce::Timer
+{
+public:
+    FmPanel (AuraProcessor&, int layer);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    void timerCallback() override { if (isShowing()) repaint(); }
+    int layer;
+    LabeledCombo algo;
+    KnobSet knobs;
+    juce::Rectangle<int> viewArea;
+    std::atomic<float> *algoP, *r1P, *r2P;
+};
+
+class SamplePanel : public juce::Component, private juce::Timer
+{
+public:
+    SamplePanel (AuraProcessor&, int layer);
+    void paint (juce::Graphics&) override;
     void resized() override;
     void loadFiles (const juce::Array<juce::File>& files);
 
 private:
     void timerCallback() override;
+    void rebuild();
 
     AuraProcessor& proc;
     int layer;
-    LabeledCombo source, wave, fmAlgo;
     ToggleBox oneShot;
     juce::TextButton loadButton { "Load samples..." };
     juce::Label statusLabel;
-    KnobSet knobs;
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::Rectangle<int> viewArea;
+    aura::SampleBank::Ptr bank;
+    int bankVersion = -1;
+    std::vector<float> mins, maxs;
+    float loopS = -1.f, loopE = -1.f;
+    juce::String info;
+};
+
+class OscSection : public Section, private juce::Timer
+{
+public:
+    OscSection (AuraProcessor&, int layer);
+    void resized() override;
+    void loadFiles (const juce::Array<juce::File>& files) { sample.loadFiles (files); }
+
+private:
+    enum Type { TypeAnalog = 0, TypeWavetable, TypeFm, kNumTypes };
+    void timerCallback() override;
+    int currentSource() const;
+    int currentType() const;
+
+    AuraProcessor& proc;
+    int layer;
+    LabeledCombo source;
+    juce::TextButton typeBtn[kNumTypes];
+    AnalogPanel analog;
+    WavetablePanel wavetable;
+    FmPanel fm;
+    SamplePanel sample;
+    int lastSrc = -1, lastType = -1, lastAnalogWave = 0;
 };
 
 class FilterSection : public Section
@@ -406,22 +486,28 @@ private:
     std::atomic<float> *enP, *arpP, *seqP;
 };
 
-class FxNode : public juce::Component
+// Bloc unique regroupant les effets en envoi (Chorus / Delay / Reverb)
+class FxBlockNode : public juce::Component
 {
 public:
-    FxNode (APVTS_&, const juce::String& title, const juce::String& retId, juce::Colour);
-    std::function<void()> onSelect;
-    bool selected = false;
-    juce::Colour colour;
+    static constexpr int kFx = 3;
+    explicit FxBlockNode (APVTS_&);
+    std::function<void (int)> onSelect;      // 0..kFx-1
+    int selectedRow = -1;
+
+    static juce::Colour rowColour (int i);
+    static const char* rowName (int i);
+    juce::Point<float> inlet (int i) const;   // coordonnees du parent
+    juce::Point<float> outlet (int i) const;
 
     void paint (juce::Graphics&) override;
     void resized() override;
-    void mouseDown (const juce::MouseEvent&) override { if (onSelect) onSelect(); }
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
-    juce::String title;
-    juce::Slider ret;
-    std::unique_ptr<APVTS_::SliderAttachment> retA;
+    juce::Rectangle<int> rowBounds (int i) const;
+    juce::Slider ret[kFx];
+    std::unique_ptr<APVTS_::SliderAttachment> retA[kFx];
 };
 
 class MasterNode : public juce::Component, private juce::Timer
@@ -445,7 +531,7 @@ private:
 class RoutingGraph : public juce::Component, private juce::Timer
 {
 public:
-    static constexpr int kFx = 3;
+    static constexpr int kFx = FxBlockNode::kFx;
     static int masterIndex() { return aura::kLayers + kFx; }   // index de selection du master
 
     explicit RoutingGraph (AuraProcessor&);
@@ -461,7 +547,7 @@ private:
 
     AuraProcessor& proc;
     std::vector<std::unique_ptr<LayerNode>> layerNodes;
-    std::vector<std::unique_ptr<FxNode>> fxNodes;
+    FxBlockNode fxBlock;
     MasterNode master;
     juce::Rectangle<int> outBox;
 };
@@ -481,6 +567,19 @@ private:
 };
 
 // ============================================================================
+// Page FX : tous les effets dans une seule fenetre
+// ============================================================================
+class FxPage : public juce::Component
+{
+public:
+    explicit FxPage (AuraProcessor&);
+    void resized() override;
+
+private:
+    std::vector<std::unique_ptr<ParamPanel>> panels;
+};
+
+// ============================================================================
 // Page ARP
 // ============================================================================
 class ArpPage : public Section
@@ -497,12 +596,12 @@ private:
 };
 
 // ============================================================================
-// Bandeau des couches
+// Colonne des couches (gauche) : on/off, nom, type, Mute, Solo
 // ============================================================================
-class LayerTab : public juce::Component, private juce::Timer
+class LayerRow : public juce::Component, private juce::Timer
 {
 public:
-    LayerTab (AuraProcessor&, int layer);
+    LayerRow (AuraProcessor&, int layer);
     std::function<void()> onSelect;
     bool selected = false;
 
@@ -515,7 +614,8 @@ private:
     AuraProcessor& proc;
     int layer;
     juce::ToggleButton power;
-    std::unique_ptr<APVTS_::ButtonAttachment> powerA;
+    juce::TextButton mute { "M" }, solo { "S" };
+    std::unique_ptr<APVTS_::ButtonAttachment> powerA, muteA, soloA;
 };
 
 // ============================================================================
@@ -534,7 +634,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum Page { PageLayer = 0, PageRouting, PageArp, kNumPages };
+    enum Page { PageLayer = 0, PageRouting, PageFx, PageArp, kNumPages };
     void showPage (int p);
     void selectLayer (int l);
 
@@ -546,9 +646,10 @@ private:
     juce::Label outputLabel;
     std::unique_ptr<APVTS_::SliderAttachment> outputA;
 
-    std::vector<std::unique_ptr<LayerTab>> tabs;
+    std::vector<std::unique_ptr<LayerRow>> rows;
     std::vector<std::unique_ptr<LayerEditor>> layerEditors;
     RoutingPage routing;
+    FxPage fxPage;
     ArpPage arpPage;
 
     int page = PageLayer, currentLayer = 0;

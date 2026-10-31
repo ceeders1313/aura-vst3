@@ -293,6 +293,10 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---- couches ----
     dryBus.clear(); choBus.clear(); dlyBus.clear(); revBus.clear();
 
+    bool anySolo = false;
+    for (int l = 0; l < kLayers; ++l)
+        if (lpPtr[l][LP_Enable]->load() > 0.5f && lpPtr[l][LP_Solo]->load() > 0.5f) anySolo = true;
+
     for (int l = 0; l < kLayers; ++l)
     {
         auto& L = layers[(size_t) l];
@@ -332,7 +336,9 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         L.synth.process (layerBuf.getWritePointer (0), layerBuf.getWritePointer (1), n,
                          useSeq ? L.seqMidi : srcMidi);
 
-        const float level = P (LP_Level);
+        // mute / solo : la couche continue de jouer (timing seq/arp conserve), seul le gain tombe a 0 (rampe)
+        const bool audible = P (LP_Mute) < 0.5f && (! anySolo || P (LP_Solo) > 0.5f);
+        const float level = audible ? P (LP_Level) : 0.f;
         const float pan = juce::jlimit (-1.f, 1.f, P (LP_Pan));
         const float ang = (pan + 1.f) * 0.25f * 3.14159265f;
         const float cl = std::cos (ang) * 1.41421356f, cr = std::sin (ang) * 1.41421356f;
@@ -429,6 +435,14 @@ juce::String AuraProcessor::getStatusText (int layer) const
     return L.status;
 }
 
+aura::SampleBank::Ptr AuraProcessor::getUiBank (int layer, int& version) const
+{
+    const auto& L = layers[(size_t) layer];
+    const juce::ScopedLock sl (L.statusLock);
+    version = L.uiBankVersion;
+    return L.uiBank;
+}
+
 void AuraProcessor::loadSamples (int layer, const juce::Array<juce::File>& files)
 {
     if (files.isEmpty()) return;
@@ -460,6 +474,11 @@ void AuraProcessor::loadSamples (int layer, const juce::Array<juce::File>& files
             const juce::SpinLock::ScopedLockType lock (L.bankLock);
             L.pendingBank = bank;
             L.bankDirty = true;
+        }
+        {
+            const juce::ScopedLock sl (L.statusLock);
+            L.uiBank = bank;
+            ++L.uiBankVersion;
         }
         setStatus (layer, name + ": " + report);
     });

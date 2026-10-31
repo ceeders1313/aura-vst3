@@ -17,6 +17,7 @@ enum LP
     LP_Mseg1Time, LP_Mseg1Loop, LP_Mseg2Time, LP_Mseg2Loop,
     LP_Macro1, LP_Macro2, LP_Macro3, LP_Macro4,
     LP_SeqOn, LP_SeqRate, LP_SeqLen, LP_SeqGate, LP_SeqSwing,
+    LP_Mute, LP_Solo,
     LP_SlotBase,
     LP_StepBase = LP_SlotBase + 3 * kSlots,
     kNumLP = LP_StepBase + 3 * kSeqSteps
@@ -48,7 +49,7 @@ inline const LPSpec kLpSpecs[] = {
     { "arp",     "Arp",           Kind::Bool,   0, 1, 1, 0, "" },
     { "source",  "Source",        Kind::Choice, 0, 0, 1, 0, "Synth|Sample|Synth+Sample" },
     { "oneshot", "One-shot",      Kind::Bool,   0, 1, 1, 0, "" },
-    { "wave",    "Waveform",      Kind::Choice, 0, 0, 1, 0, "Saw|Square|Wavetable|FM" },
+    { "wave",    "Waveform",      Kind::Choice, 0, 0, 1, 0, "Saw|Square|Wavetable|FM|Triangle|Sine" },
     { "unison",  "Unison",        Kind::Int,    1, 7, 1, 5, "" },
     { "detune",  "Detune",        Kind::Float,  0, 1, 1, 0.25f, "" },
     { "wtpos",   "WT Position",   Kind::Float,  0, 1, 1, 0, "" },
@@ -84,6 +85,8 @@ inline const LPSpec kLpSpecs[] = {
     { "seqlen",  "Seq Length",    Kind::Int,    1, 16, 1, 16, "" },
     { "seqgate", "Seq Gate",      Kind::Float,  0.05f, 0.95f, 1, 0.5f, "" },
     { "seqswing","Seq Swing",     Kind::Float,  0, 1, 1, 0, "" },
+    { "mute",    "Mute",          Kind::Bool,   0, 1, 1, 0, "" },
+    { "solo",    "Solo",          Kind::Bool,   0, 1, 1, 0, "" },
 };
 static_assert (sizeof (kLpSpecs) / sizeof (LPSpec) == LP_SlotBase, "kLpSpecs doit suivre l'enum LP");
 
