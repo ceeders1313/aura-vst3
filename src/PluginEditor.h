@@ -236,7 +236,7 @@ private:
     std::atomic<float>* lenP;
     int topRow;
     Drag drag = DragNone;
-    int dragNote = -1, grabStep = 0, grabRow = 0, lastLen = 1, lastPlay = -2, tick = 0;
+    int dragNote = -1, grabStep = 0, grabRow = 0, lastLen = 1, lastPlay = -2, tick = 0, seenVersion = -1;
 };
 
 // ============================================================================
@@ -387,13 +387,16 @@ private:
     KnobSet knobs;
 };
 
-class MsegPane : public juce::Component
+class MsegPane : public juce::Component, private juce::Timer
 {
 public:
     MsegPane (AuraProcessor&, int layer, int idx);
     void resized() override;
 
 private:
+    void timerCallback() override;   // recharge la forme apres un chargement de preset
+    AuraProcessor& proc;
+    int layer, idx, seenVersion = -1;
     MsegEditor editor;
     ToggleBox loop;
     KnobSet knobs;
@@ -615,6 +618,77 @@ private:
 };
 
 // ============================================================================
+// Page LIB : browser de presets
+// ============================================================================
+class BrowserPage : public juce::Component,
+                    private juce::ChangeListener,
+                    private juce::ListBoxModel,
+                    private juce::Timer
+{
+public:
+    explicit BrowserPage (AuraProcessor&);
+    ~BrowserPage() override;
+    void resized() override;
+    void paint (juce::Graphics&) override;
+
+    void loadRelative (int delta);      // fleches precedent / suivant de la barre du haut
+    void focusSave();
+
+private:
+    int getNumRows() override { return (int) shown.size(); }
+    void paintListBoxItem (int row, juce::Graphics&, int w, int h, bool selected) override;
+    void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override { loadRow (row); }
+    void selectedRowsChanged (int) override { updateInfo(); }
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void timerCallback() override;
+
+    void refilter();
+    void setCategory (const juce::String& c);
+    void loadRow (int row);
+    void updateInfo();
+    void doSave();
+    void doDelete();
+    void toggleFavorite();
+    int currentIndex() const;
+
+    AuraProcessor& proc;
+    std::vector<aura::PresetInfo> all, shown;
+    juce::String category { "All" };
+
+    std::vector<std::unique_ptr<juce::TextButton>> catButtons;
+    juce::TextEditor search;
+    juce::ListBox list;
+    juce::Label info, status;
+    juce::TextButton loadBtn { "Load" }, favBtn { "Favorite" }, deleteBtn { "Delete" },
+                     rescanBtn { "Rescan" }, folderBtn { "Open folder" };
+    bool confirmDelete = false;
+
+    juce::Label saveTitle;
+    juce::TextEditor saveName, saveTags, saveAuthor;
+    juce::ComboBox saveCat;
+    juce::ToggleButton copySamples { "Copy used samples into the AURA library (portable preset)" };
+    juce::TextButton saveBtn { "Save preset" };
+};
+
+// Barre preset du haut : precedent / nom / suivant / sauver
+class PresetBar : public juce::Component, private juce::Timer
+{
+public:
+    explicit PresetBar (AuraProcessor&);
+    std::function<void (int)> onStep;       // -1 / +1
+    std::function<void()> onOpen, onSave;
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseUp (const juce::MouseEvent&) override { if (onOpen) onOpen(); }
+
+private:
+    void timerCallback() override;
+    AuraProcessor& proc;
+    juce::TextButton prev { "<" }, next { ">" }, save { "Save" };
+    juce::String name;
+};
+
+// ============================================================================
 // Colonne des couches (gauche) : on/off, nom, type, Mute, Solo
 // ============================================================================
 class LayerRow : public juce::Component, private juce::Timer
@@ -653,7 +727,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum Page { PageLayer = 0, PageSeq, PageRouting, PageFx, kNumPages };
+    enum Page { PageLib = 0, PageLayer, PageSeq, PageRouting, PageFx, kNumPages };
     void showPage (int p);
     void selectLayer (int l);
 
@@ -661,6 +735,8 @@ private:
     AuraProcessor& proc;
 
     juce::TextButton nav[kNumPages];
+    PresetBar presetBar;
+    BrowserPage browser;
     juce::Slider output;
     juce::Label outputLabel;
     std::unique_ptr<APVTS_::SliderAttachment> outputA;
@@ -672,4 +748,5 @@ private:
     FxPage fxPage;
 
     int page = PageLayer, currentLayer = 0;
+    juce::TooltipWindow tooltips { this, 600 };
 };

@@ -1001,19 +1001,29 @@ void LfoPane::resized()
     knobs.layout (a.removeFromTop (std::min (a.getHeight(), 110)), 1);
 }
 
-MsegPane::MsegPane (AuraProcessor& p, int layer, int idx) : knobs (*this, p.apvts)
+MsegPane::MsegPane (AuraProcessor& p, int layerIndex, int index)
+    : proc (p), layer (layerIndex), idx (index), knobs (*this, p.apvts)
 {
     addAndMakeVisible (editor);
+    seenVersion = p.getStateVersion();
     editor.setShape (p.getMseg (layer, idx));
-    auto* proc = &p;
-    editor.onChange = [proc, layer, idx] (const MsegShape& s) { proc->setMseg (layer, idx, s); };
+    editor.onChange = [this] (const MsegShape& s) { proc.setMseg (layer, idx, s); };
     loop.init (*this, p.apvts, lpId (layer, idx == 0 ? LP_Mseg1Loop : LP_Mseg2Loop), "Loop");
     knobs.add (lpId (layer, idx == 0 ? LP_Mseg1Time : LP_Mseg2Time), "Time (s)");
+    startTimerHz (4);
 
     hint.setText ("Double-click: add / delete point. Drag diamond: curve.", juce::dontSendNotification);
     hint.setColour (juce::Label::textColourId, ui::dim);
     hint.setFont (juce::FontOptions (11.f));
     addAndMakeVisible (hint);
+}
+
+void MsegPane::timerCallback()
+{
+    const int v = proc.getStateVersion();
+    if (v == seenVersion) return;
+    seenVersion = v;
+    editor.setShape (proc.getMseg (layer, idx));
 }
 
 void MsegPane::resized()
@@ -1236,6 +1246,11 @@ juce::String PianoRoll::rowLabel (int row) const
 
 void PianoRoll::timerCallback()
 {
+    if (proc.getStateVersion() != seenVersion)
+    {
+        seenVersion = proc.getStateVersion();
+        refresh();
+    }
     if (! isShowing()) return;
     const int st = proc.getPlayStep (layer, kind);
     if (st != lastPlay || ++tick >= 6)
@@ -2161,6 +2176,349 @@ void FxPage::resized()
 }
 
 // ============================================================================
+// Page LIB : browser de presets
+// ============================================================================
+static void styleEditor (juce::TextEditor& e, const juce::String& hint)
+{
+    e.setTextToShowWhenEmpty (hint, ui::dim);
+    e.setColour (juce::TextEditor::backgroundColourId, ui::panel2);
+    e.setColour (juce::TextEditor::outlineColourId, ui::outline);
+    e.setColour (juce::TextEditor::focusedOutlineColourId, ui::accent);
+    e.setColour (juce::TextEditor::textColourId, ui::text);
+}
+
+BrowserPage::BrowserPage (AuraProcessor& p) : proc (p)
+{
+    juce::StringArray cats { "All", "Favorites" };
+    cats.addArray (PresetLibrary::categories());
+    for (const auto& c : cats)
+    {
+        auto b = std::make_unique<juce::TextButton> (c);
+        styleToggleButton (*b, ui::accent);
+        b->onClick = [this, c] { setCategory (c); };
+        addAndMakeVisible (*b);
+        catButtons.push_back (std::move (b));
+    }
+
+    styleEditor (search, "Search name, tags, author...");
+    search.onTextChange = [this] { refilter(); };
+    addAndMakeVisible (search);
+
+    list.setModel (this);
+    list.setRowHeight (30);
+    list.setColour (juce::ListBox::backgroundColourId, ui::panel);
+    list.setColour (juce::ListBox::outlineColourId, ui::outline);
+    list.setOutlineThickness (1);
+    addAndMakeVisible (list);
+
+    info.setJustificationType (juce::Justification::topLeft);
+    info.setColour (juce::Label::textColourId, ui::text);
+    addAndMakeVisible (info);
+    status.setColour (juce::Label::textColourId, ui::dim);
+    status.setFont (juce::FontOptions (12.f));
+    addAndMakeVisible (status);
+
+    loadBtn.onClick   = [this] { loadRow (list.getSelectedRow()); };
+    favBtn.onClick    = [this] { toggleFavorite(); };
+    deleteBtn.onClick = [this] { doDelete(); };
+    rescanBtn.onClick = [this] { proc.library.rescanAsync(); status.setText ("Scanning...", juce::dontSendNotification); };
+    folderBtn.onClick = [] { PresetLibrary::presetsDir().createDirectory(); PresetLibrary::presetsDir().revealToUser(); };
+    for (auto* b : { &loadBtn, &favBtn, &deleteBtn, &rescanBtn, &folderBtn }) addAndMakeVisible (*b);
+
+    saveTitle.setText ("Save current sound", juce::dontSendNotification);
+    saveTitle.setFont (juce::FontOptions (14.f, juce::Font::bold));
+    addAndMakeVisible (saveTitle);
+    styleEditor (saveName, "Preset name");
+    styleEditor (saveTags, "Tags (comma separated: warm, analog, wide...)");
+    styleEditor (saveAuthor, "Author");
+    saveCat.addItemList (PresetLibrary::categories(), 1);
+    saveCat.setSelectedId (1, juce::dontSendNotification);
+    copySamples.setToggleState (true, juce::dontSendNotification);
+    saveBtn.setColour (juce::TextButton::buttonColourId, ui::accent.withAlpha (0.35f));
+    saveBtn.onClick = [this] { doSave(); };
+    for (auto* c : std::initializer_list<juce::Component*> { &saveName, &saveTags, &saveAuthor, &saveCat, &copySamples, &saveBtn })
+        addAndMakeVisible (c);
+
+    setCategory ("All");
+    proc.library.addChangeListener (this);
+    if (proc.library.hasScanned()) changeListenerCallback (nullptr);
+    else { proc.library.rescanAsync(); status.setText ("Scanning presets...", juce::dontSendNotification); }
+    startTimerHz (2);
+}
+
+BrowserPage::~BrowserPage()
+{
+    proc.library.removeChangeListener (this);
+    list.setModel (nullptr);
+}
+
+void BrowserPage::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    all = proc.library.snapshot();
+    status.setText (juce::String ((int) all.size()) + " preset(s) in " + PresetLibrary::presetsDir().getFullPathName(),
+                    juce::dontSendNotification);
+    refilter();
+}
+
+void BrowserPage::timerCallback()
+{
+    deleteBtn.setButtonText (confirmDelete ? "Confirm delete?" : "Delete");
+}
+
+void BrowserPage::setCategory (const juce::String& c)
+{
+    category = c;
+    for (auto& b : catButtons) b->setToggleState (b->getButtonText() == c, juce::dontSendNotification);
+    refilter();
+}
+
+void BrowserPage::refilter()
+{
+    const auto q = search.getText().trim().toLowerCase();
+    const auto cur = proc.getPresetFile();
+    shown.clear();
+    for (const auto& p : all)
+    {
+        if (category == "Favorites" && ! p.favorite) continue;
+        if (category != "All" && category != "Favorites" && p.category != category) continue;
+        if (q.isNotEmpty() && ! (p.name.toLowerCase().contains (q) || p.tags.toLowerCase().contains (q)
+                                 || p.author.toLowerCase().contains (q) || p.category.toLowerCase().contains (q)))
+            continue;
+        shown.push_back (p);
+    }
+    list.updateContent();
+    list.deselectAllRows();
+    for (size_t i = 0; i < shown.size(); ++i)
+        if (shown[i].file == cur) { list.selectRow ((int) i); break; }
+    list.repaint();
+    updateInfo();
+}
+
+int BrowserPage::currentIndex() const
+{
+    const auto cur = proc.getPresetFile();
+    for (size_t i = 0; i < shown.size(); ++i)
+        if (shown[i].file == cur) return (int) i;
+    return -1;
+}
+
+void BrowserPage::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
+{
+    if (row < 0 || row >= (int) shown.size()) return;
+    const auto& p = shown[(size_t) row];
+    const bool loaded = p.file == proc.getPresetFile();
+    if (selected) { g.setColour (ui::accent.withAlpha (0.18f)); g.fillRect (0, 0, w, h); }
+    g.setColour (ui::outline.withAlpha (0.5f));
+    g.drawHorizontalLine (h - 1, 0.f, (float) w);
+
+    g.setColour (p.favorite ? juce::Colour (0xffffd54f) : ui::outline);
+    g.setFont (juce::FontOptions (15.f));
+    g.drawText (p.favorite ? juce::String (juce::CharPointer_UTF8 ("\xe2\x98\x85")) : juce::String (juce::CharPointer_UTF8 ("\xe2\x98\x86")),
+                6, 0, 20, h, juce::Justification::centred);
+
+    g.setColour (loaded ? ui::accent : ui::text);
+    g.setFont (juce::FontOptions (14.f, loaded ? juce::Font::bold : juce::Font::plain));
+    g.drawText (p.name, 30, 0, w * 40 / 100, h, juce::Justification::centredLeft);
+    g.setColour (ui::dim);
+    g.setFont (juce::FontOptions (12.f));
+    g.drawText (p.category, 30 + w * 40 / 100, 0, w * 18 / 100, h, juce::Justification::centredLeft);
+    g.drawText (p.tags, 30 + w * 58 / 100, 0, w * 40 / 100 - 36, h, juce::Justification::centredLeft);
+}
+
+void BrowserPage::updateInfo()
+{
+    const int r = list.getSelectedRow();
+    confirmDelete = false;
+    if (r < 0 || r >= (int) shown.size())
+    {
+        info.setText ("Select a preset. Double-click to load.\n\nPresets are saved in:\n"
+                      + PresetLibrary::presetsDir().getFullPathName()
+                      + "\nCopied samples go to:\n" + PresetLibrary::samplesDir().getFullPathName(),
+                      juce::dontSendNotification);
+        return;
+    }
+    const auto& p = shown[(size_t) r];
+    info.setText (p.name + "\n\nCategory: " + p.category
+                  + "\nAuthor: " + (p.author.isNotEmpty() ? p.author : juce::String ("-"))
+                  + "\nTags: " + (p.tags.isNotEmpty() ? p.tags : juce::String ("-"))
+                  + "\nLayers: " + p.layers
+                  + "\nModified: " + p.modified.toString (true, true, false),
+                  juce::dontSendNotification);
+    favBtn.setButtonText (p.favorite ? "Unfavorite" : "Favorite");
+}
+
+void BrowserPage::loadRow (int row)
+{
+    if (row < 0 || row >= (int) shown.size()) return;
+    juce::String err;
+    if (proc.loadPreset (shown[(size_t) row].file, err))
+    {
+        status.setText ("Loaded: " + shown[(size_t) row].name, juce::dontSendNotification);
+        saveName.setText (shown[(size_t) row].name, false);
+        saveTags.setText (shown[(size_t) row].tags, false);
+        saveAuthor.setText (shown[(size_t) row].author, false);
+        const int ci = PresetLibrary::categories().indexOf (shown[(size_t) row].category);
+        if (ci >= 0) saveCat.setSelectedId (ci + 1, juce::dontSendNotification);
+    }
+    else
+    {
+        status.setText ("Error: " + err, juce::dontSendNotification);
+    }
+    list.repaint();
+}
+
+void BrowserPage::loadRelative (int delta)
+{
+    if (shown.empty()) return;
+    int i = currentIndex();
+    i = (i < 0) ? (delta > 0 ? 0 : (int) shown.size() - 1)
+                : (i + delta + (int) shown.size()) % (int) shown.size();
+    list.selectRow (i);
+    loadRow (i);
+}
+
+void BrowserPage::focusSave()
+{
+    if (saveName.isEmpty()) saveName.setText (proc.getPresetName() == "Init" ? juce::String() : proc.getPresetName(), false);
+    saveName.grabKeyboardFocus();
+    saveName.selectAll();
+}
+
+void BrowserPage::doSave()
+{
+    const auto name = saveName.getText().trim();
+    if (name.isEmpty()) { status.setText ("Enter a preset name first.", juce::dontSendNotification); return; }
+
+    AuraProcessor::PresetMeta meta;
+    meta.name = name;
+    meta.category = saveCat.getText().isNotEmpty() ? saveCat.getText() : juce::String ("Other");
+    meta.tags = saveTags.getText().trim();
+    meta.author = saveAuthor.getText().trim();
+
+    const auto file = PresetLibrary::presetsDir().getChildFile (meta.category.replace ("/", "-").trim())
+                          .getChildFile (juce::File::createLegalFileName (name) + PresetLibrary::kExt);
+    juce::String err;
+    if (proc.savePreset (file, meta, copySamples.getToggleState(), err))
+        status.setText ((file.existsAsFile() ? "Saved: " : "Saved ") + file.getFullPathName(), juce::dontSendNotification);
+    else
+        status.setText ("Error: " + err, juce::dontSendNotification);
+}
+
+void BrowserPage::doDelete()
+{
+    const int r = list.getSelectedRow();
+    if (r < 0 || r >= (int) shown.size()) return;
+    if (! confirmDelete) { confirmDelete = true; return; }      // deuxieme clic = confirmation
+    confirmDelete = false;
+    const auto f = shown[(size_t) r].file;
+    if (f.moveToTrash() || f.deleteFile())
+    {
+        status.setText ("Deleted (moved to trash): " + shown[(size_t) r].name, juce::dontSendNotification);
+        proc.library.rescanAsync();
+    }
+}
+
+void BrowserPage::toggleFavorite()
+{
+    const int r = list.getSelectedRow();
+    if (r < 0 || r >= (int) shown.size()) return;
+    auto& p = shown[(size_t) r];
+    if (! PresetLibrary::setFavorite (p.file, ! p.favorite)) return;
+    p.favorite = ! p.favorite;
+    for (auto& a : all) if (a.file == p.file) a.favorite = p.favorite;
+    list.repaint();
+    updateInfo();
+}
+
+void BrowserPage::paint (juce::Graphics& g)
+{
+    g.setColour (ui::panel);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.f);
+}
+
+void BrowserPage::resized()
+{
+    auto a = getLocalBounds().reduced (8);
+    status.setBounds (a.removeFromBottom (20));
+    a.removeFromBottom (4);
+
+    auto left = a.removeFromLeft (150);
+    for (auto& b : catButtons)
+    {
+        b->setBounds (left.removeFromTop (28).reduced (0, 2));
+    }
+    a.removeFromLeft (8);
+
+    auto right = a.removeFromRight (std::min (330, a.getWidth() / 3));
+    a.removeFromRight (8);
+
+    search.setBounds (a.removeFromTop (28));
+    a.removeFromTop (6);
+    list.setBounds (a);
+
+    // panneau de droite : infos + actions + sauvegarde
+    auto saveArea = right.removeFromBottom (230);
+    auto btns = right.removeFromBottom (64);
+    info.setBounds (right);
+    auto b1 = btns.removeFromTop (30);
+    const int bw = b1.getWidth() / 3;
+    loadBtn.setBounds (b1.removeFromLeft (bw).reduced (2));
+    favBtn.setBounds (b1.removeFromLeft (bw).reduced (2));
+    deleteBtn.setBounds (b1.reduced (2));
+    auto b2 = btns.removeFromTop (30);
+    rescanBtn.setBounds (b2.removeFromLeft (b2.getWidth() / 2).reduced (2));
+    folderBtn.setBounds (b2.reduced (2));
+
+    saveArea.removeFromTop (8);
+    saveTitle.setBounds (saveArea.removeFromTop (22));
+    for (auto* c : std::initializer_list<juce::Component*> { &saveName, &saveTags, &saveAuthor, &saveCat })
+    {
+        c->setBounds (saveArea.removeFromTop (28));
+        saveArea.removeFromTop (4);
+    }
+    copySamples.setBounds (saveArea.removeFromTop (26));
+    saveBtn.setBounds (saveArea.removeFromTop (30).reduced (0, 2));
+}
+
+// ---------------- PresetBar ----------------
+PresetBar::PresetBar (AuraProcessor& p) : proc (p)
+{
+    prev.onClick = [this] { if (onStep) onStep (-1); };
+    next.onClick = [this] { if (onStep) onStep (1); };
+    save.onClick = [this] { if (onSave) onSave(); };
+    prev.setTooltip ("Previous preset");
+    next.setTooltip ("Next preset");
+    save.setTooltip ("Save preset (LIB page)");
+    for (auto* b : { &prev, &next, &save }) addAndMakeVisible (*b);
+    startTimerHz (4);
+    timerCallback();
+}
+
+void PresetBar::timerCallback()
+{
+    const auto n = proc.getPresetName();
+    if (n != name) { name = n; repaint(); }
+}
+
+void PresetBar::resized()
+{
+    auto a = getLocalBounds();
+    save.setBounds (a.removeFromRight (56).reduced (2, 4));
+    next.setBounds (a.removeFromRight (30).reduced (2, 4));
+    prev.setBounds (a.removeFromRight (30).reduced (2, 4));
+}
+
+void PresetBar::paint (juce::Graphics& g)
+{
+    const auto r = getLocalBounds().toFloat().withTrimmedRight (120.f);
+    g.setColour (ui::panel2);
+    g.fillRoundedRectangle (r, 5.f);
+    g.setColour (ui::text);
+    g.setFont (juce::FontOptions (15.f));
+    g.drawText (name, r.reduced (12.f, 0.f), juce::Justification::centredLeft);
+}
+
+// ============================================================================
 // Colonne des couches
 // ============================================================================
 LayerRow::LayerRow (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
@@ -2220,11 +2578,17 @@ void LayerRow::paint (juce::Graphics& g)
 // Editeur principal
 // ============================================================================
 AuraEditor::AuraEditor (AuraProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), routing (p), fxPage (p)
+    : AudioProcessorEditor (&p), proc (p), presetBar (p), browser (p), routing (p), fxPage (p)
 {
     setLookAndFeel (&look);
 
-    static const char* const names[kNumPages] = { "LAYER", "ARP / SEQ", "ROUTING", "FX" };
+    addAndMakeVisible (presetBar);
+    addChildComponent (browser);
+    presetBar.onStep = [this] (int d) { browser.loadRelative (d); };
+    presetBar.onOpen = [this] { showPage (PageLib); };
+    presetBar.onSave = [this] { showPage (PageLib); browser.focusSave(); };
+
+    static const char* const names[kNumPages] = { "LIB", "LAYER", "ARP / SEQ", "ROUTING", "FX" };
     for (int i = 0; i < kNumPages; ++i)
     {
         nav[i].setButtonText (names[i]);
@@ -2246,7 +2610,7 @@ AuraEditor::AuraEditor (AuraProcessor& p)
     for (int l = 0; l < kLayers; ++l)
     {
         auto r = std::make_unique<LayerRow> (p, l);
-        r->onSelect = [this, l] { selectLayer (l); showPage (PageLayer); };
+        r->onSelect = [this, l] { selectLayer (l); if (page != PageSeq) showPage (PageLayer); };
         addAndMakeVisible (*r);
         rows.push_back (std::move (r));
 
@@ -2292,6 +2656,7 @@ void AuraEditor::showPage (int p)
         layerEditors[(size_t) i]->setVisible (page == PageLayer && i == currentLayer);
         seqPages[(size_t) i]->setVisible (page == PageSeq && i == currentLayer);
     }
+    browser.setVisible (page == PageLib);
     routing.setVisible (page == PageRouting);
     fxPage.setVisible (page == PageFx);
     if (page == PageRouting) routing.select (currentLayer);
@@ -2331,14 +2696,6 @@ void AuraEditor::paint (juce::Graphics& g)
     g.setColour (ui::dim);
     g.setFont (juce::FontOptions (11.f));
     g.drawText ("v" JucePlugin_VersionString, 98, 22, 60, 16, juce::Justification::centredLeft);
-
-    // emplacement du futur browser de presets
-    const juce::Rectangle<float> preset (170.f, 10.f, 320.f, 32.f);
-    g.setColour (ui::panel2);
-    g.fillRoundedRectangle (preset, 5.f);
-    g.setColour (ui::text);
-    g.setFont (juce::FontOptions (14.f));
-    g.drawText ("Init", preset.reduced (12.f, 0.f), juce::Justification::centredLeft);
 }
 
 void AuraEditor::resized()
@@ -2351,8 +2708,11 @@ void AuraEditor::resized()
     top.removeFromRight (12);
     for (int i = kNumPages - 1; i >= 0; --i)
     {
-        nav[i].setBounds (top.removeFromRight (96).reduced (3, 10));
+        nav[i].setBounds (top.removeFromRight (i == PageSeq ? 104 : 86).reduced (3, 10));
     }
+    top.removeFromRight (12);
+    top.removeFromLeft (165);
+    presetBar.setBounds (top.withSizeKeepingCentre (std::min (460, top.getWidth()), 34));
 
     // colonne des couches a gauche, edition de la centrale jusqu'au bord droit
     auto column = a.removeFromLeft (230).reduced (6, 8);
@@ -2365,6 +2725,7 @@ void AuraEditor::resized()
     const auto pageArea = a.reduced (4, 6);
     for (auto& e : layerEditors) e->setBounds (pageArea);
     for (auto& s : seqPages) s->setBounds (pageArea);
+    browser.setBounds (pageArea);
     routing.setBounds (pageArea);
     fxPage.setBounds (pageArea);
 }

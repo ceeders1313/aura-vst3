@@ -508,8 +508,127 @@ void AuraProcessor::setStateInformation (const void* data, int size)
 {
     auto xml = getXmlFromBinary (data, size);
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return;
+    applyState (juce::ValueTree::fromXml (*xml));
+}
 
-    apvts.replaceState (juce::ValueTree::fromXml (*xml));
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+static const juce::String kSamplesToken ("$SAMPLES/");
+
+static juce::String samplePathsId (int l) { return "L" + juce::String (l + 1) + "_samplePaths"; }
+
+juce::String AuraProcessor::getPresetName() const
+{
+    const auto n = apvts.state.getProperty ("presetName").toString();
+    return n.isNotEmpty() ? n : juce::String ("Init");
+}
+
+juce::File AuraProcessor::getPresetFile() const
+{
+    const auto p = apvts.state.getProperty ("presetFile").toString();
+    return p.isNotEmpty() ? juce::File (p) : juce::File();
+}
+
+void AuraProcessor::clearSamples (int layer)
+{
+    auto& L = layers[(size_t) layer];
+    {
+        const juce::SpinLock::ScopedLockType lock (L.bankLock);
+        L.pendingBank = nullptr;        // la banque reste vivante via keepAlive : jamais detruite cote audio
+        L.bankDirty = true;
+    }
+    {
+        const juce::ScopedLock sl (L.statusLock);
+        L.uiBank = nullptr;
+        ++L.uiBankVersion;
+    }
+    setStatus (layer, "No samples loaded");
+}
+
+bool AuraProcessor::savePreset (const juce::File& file, const PresetMeta& meta, bool copySamples, juce::String& error)
+{
+    using aura::PresetLibrary;
+    auto state = apvts.copyState();
+    state.setProperty ("presetName", meta.name, nullptr);
+    state.removeProperty ("presetFile", nullptr);
+
+    const auto samplesRoot = PresetLibrary::samplesDir();
+    juce::StringArray layerInfo;
+    for (int l = 0; l < aura::kLayers; ++l)
+    {
+        if (lpPtr[l][aura::LP_Enable]->load() < 0.5f) continue;
+        const int src = juce::roundToInt (lpPtr[l][aura::LP_Source]->load());
+        const int wave = juce::roundToInt (lpPtr[l][aura::LP_Wave]->load());
+        static const char* const waves[] = { "Saw", "Square", "Wavetable", "FM", "Triangle", "Sine" };
+        const juce::String synth (waves[juce::jlimit (0, 5, wave)]);
+        layerInfo.add ("L" + juce::String (l + 1) + ":" + (src == 1 ? juce::String ("Sample")
+                                                          : (src == 2 ? synth + "+Sample" : synth)));
+
+        const auto saved = state.getProperty (samplePathsId (l)).toString();
+        if (saved.isEmpty()) continue;
+        juce::StringArray out;
+        for (const auto& s : juce::StringArray::fromTokens (saved, "|", ""))
+        {
+            juce::File f (s);
+            if (! f.existsAsFile()) continue;
+            if (copySamples && ! f.isAChildOf (samplesRoot))
+            {
+                const auto dir = samplesRoot.getChildFile (juce::File::createLegalFileName (meta.name))
+                                            .getChildFile ("L" + juce::String (l + 1));
+                if (! dir.createDirectory()) { error = "Cannot create " + dir.getFullPathName(); return false; }
+                const auto dst = dir.getChildFile (f.getFileName());
+                if (! dst.existsAsFile() && ! f.copyFileTo (dst)) { error = "Cannot copy " + f.getFileName(); return false; }
+                f = dst;
+            }
+            out.add (f.isAChildOf (samplesRoot)
+                         ? kSamplesToken + f.getRelativePathFrom (samplesRoot).replaceCharacter ('\\', '/')
+                         : f.getFullPathName());
+        }
+        state.setProperty (samplePathsId (l), out.joinIntoString ("|"), nullptr);
+    }
+
+    juce::XmlElement root ("AuraPreset");
+    root.setAttribute ("formatVersion", PresetLibrary::kFormatVersion);
+    root.setAttribute ("name", meta.name);
+    root.setAttribute ("category", meta.category);
+    root.setAttribute ("tags", meta.tags);
+    root.setAttribute ("author", meta.author);
+    root.setAttribute ("favorite", 0);
+    root.setAttribute ("layers", layerInfo.joinIntoString ("  "));
+    if (auto xml = state.createXml()) root.addChildElement (xml.release());
+
+    file.getParentDirectory().createDirectory();
+    if (! root.writeTo (file)) { error = "Cannot write " + file.getFullPathName(); return false; }
+
+    apvts.state.setProperty ("presetName", meta.name, nullptr);
+    apvts.state.setProperty ("presetFile", file.getFullPathName(), nullptr);
+    library.rescanAsync();
+    return true;
+}
+
+bool AuraProcessor::loadPreset (const juce::File& file, juce::String& error)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr || ! xml->hasTagName ("AuraPreset")) { error = "Not an AURA preset"; return false; }
+    if (xml->getIntAttribute ("formatVersion", 1) > aura::PresetLibrary::kFormatVersion)
+    {
+        error = "Preset made with a newer AURA version";
+        return false;
+    }
+    auto* st = xml->getChildByName (apvts.state.getType());
+    if (st == nullptr) { error = "Preset has no state"; return false; }
+
+    auto tree = juce::ValueTree::fromXml (*st);
+    tree.setProperty ("presetName", xml->getStringAttribute ("name", file.getFileNameWithoutExtension()), nullptr);
+    tree.setProperty ("presetFile", file.getFullPathName(), nullptr);
+    applyState (tree);
+    return true;
+}
+
+void AuraProcessor::applyState (const juce::ValueTree& newState)
+{
+    apvts.replaceState (newState);
 
     for (int l = 0; l < aura::kLayers; ++l)
     {
@@ -526,18 +645,21 @@ void AuraProcessor::setStateInformation (const void* data, int size)
             setPattern (l, k, ps.isNotEmpty() ? aura::Pattern::fromString (ps, def) : def);
         }
 
+        // chemins de samples : absolus ou relatifs a la bibliotheque ($SAMPLES/...)
+        juce::Array<juce::File> files;
         const juce::String saved = apvts.state.getProperty (pre + "samplePaths").toString();
-        if (saved.isNotEmpty())
+        for (const auto& s : juce::StringArray::fromTokens (saved, "|", ""))
         {
-            juce::Array<juce::File> files;
-            for (const auto& s : juce::StringArray::fromTokens (saved, "|", ""))
-            {
-                juce::File f (s);
-                if (f.existsAsFile()) files.add (f);
-            }
-            if (! files.isEmpty()) loadSamples (l, files);
+            const juce::File f = s.startsWith (kSamplesToken)
+                ? aura::PresetLibrary::samplesDir().getChildFile (s.substring (kSamplesToken.length())
+                                                                    .replaceCharacter ('/', juce::File::getSeparatorChar()))
+                : juce::File (s);
+            if (f.existsAsFile()) files.add (f);
         }
+        if (! files.isEmpty()) loadSamples (l, files);
+        else                   clearSamples (l);
     }
+    ++stateVersion;
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new AuraProcessor(); }

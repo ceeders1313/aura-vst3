@@ -1,9 +1,9 @@
-cmake_minimum_required(VERSION 3.22)
+﻿cmake_minimum_required(VERSION 3.22)
 
 # Runtime statique : la DLL n'exige pas le redistribuable Visual C++
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(AURA VERSION 0.8.0 LANGUAGES C CXX)
+project(AURA VERSION 0.9.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -30,7 +30,8 @@ juce_add_plugin(AURA
 target_sources(AURA PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
-    src/data/BankLoader.cpp)
+    src/data/BankLoader.cpp
+    src/data/PresetLibrary.cpp)
 
 target_include_directories(AURA PRIVATE src)
 

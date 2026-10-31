@@ -1,7 +1,19 @@
-# AURA v0.8 - Arp + Seq par couche en piano roll, import / export MIDI
+# AURA v0.9 - browser de presets
 
 ## Build
 GitHub Actions (build.yml inchange). Artefact : AURA-vst3-win64.
+
+## Nouveau en v0.9
+- Page LIB : categories (All, Favorites, Bass, Lead, Pad...), recherche (nom, tags, auteur), liste,
+  infos (couches : Saw / Wavetable / FM / Sample...), Load (ou double-clic), Favorite, Delete (2 clics,
+  va a la corbeille), Rescan, Open folder.
+- Sauvegarde : nom, categorie, tags, auteur. Fichier `Documents/AURA/Presets/<Categorie>/<Nom>.aurapreset`
+  (XML versionne : formatVersion + etat complet : params, MSEG, motifs Arp/Seq, chemins de samples).
+- Samples : option "Copy used samples" (par defaut) -> copies dans `Documents/AURA/Samples/<Nom>/L<n>/`,
+  chemins relatifs `$SAMPLES/...` dans le preset (preset portable). Les couches synthe (forme d'onde,
+  position wavetable, FM...) sont entierement decrites par les parametres.
+- Barre du haut : nom du preset, precedent / suivant (dans la liste filtree), Save.
+- Index en memoire (scan sur thread dedie) ; SQLite/FTS5 prevu quand la bibliotheque grossira.
 
 ## Nouveau en v0.8
 - Page ARP / SEQ (par couche, couche choisie dans la colonne de gauche) : boutons ARP et SEQ

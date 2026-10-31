@@ -6,6 +6,7 @@
 #include "engine/Synth.h"
 #include "engine/LayerParams.h"
 #include "engine/PatternPlayer.h"
+#include "data/PresetLibrary.h"
 #include "fx/Effects.h"
 
 class AuraProcessor : public juce::AudioProcessor
@@ -49,6 +50,15 @@ public:
     void setPattern (int layer, int k, const aura::Pattern& p);
     int getPlayStep (int layer, int k) const { return layers[(size_t) layer].player[k & 1].currentStep(); }   // tout thread
 
+    // Presets (thread message)
+    struct PresetMeta { juce::String name, category, tags, author; };
+    bool savePreset (const juce::File& file, const PresetMeta& meta, bool copySamples, juce::String& error);
+    bool loadPreset (const juce::File& file, juce::String& error);
+    juce::String getPresetName() const;
+    juce::File getPresetFile() const;
+    int getStateVersion() const { return stateVersion.load(); }   // incremente a chaque chargement d'etat
+    aura::PresetLibrary library;
+
     // Pour les visuels de l'UI (thread message)
     const aura::WavetableBank& getWavetables() const { return wavetables; }
     aura::SampleBank::Ptr getUiBank (int layer, int& version) const;
@@ -89,6 +99,10 @@ private:
 
         bool wasOn = false;
     };
+
+    void applyState (const juce::ValueTree& newState);
+    void clearSamples (int layer);
+    std::atomic<int> stateVersion { 0 };
 
     void setStatus (int layer, const juce::String& s);
     void fillParams (int layer, aura::Params& p) const;
