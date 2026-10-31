@@ -5,8 +5,7 @@
 #include <vector>
 #include "engine/Synth.h"
 #include "engine/LayerParams.h"
-#include "engine/Arp.h"
-#include "engine/StepSeq.h"
+#include "engine/PatternPlayer.h"
 #include "fx/Effects.h"
 
 class AuraProcessor : public juce::AudioProcessor
@@ -43,7 +42,12 @@ public:
     juce::String getStatusText (int layer) const;
     aura::MsegShape getMseg (int layer, int idx) const;
     void setMseg (int layer, int idx, const aura::MsegShape& s);
-    int getSeqStep (int layer) const { return layers[(size_t) layer].seq.currentStep(); }   // tout thread
+
+    // Motifs Arp (k = 0) / Seq (k = 1) de chaque couche
+    enum { kPatArp = 0, kPatSeq = 1 };
+    aura::Pattern getPattern (int layer, int k) const;
+    void setPattern (int layer, int k, const aura::Pattern& p);
+    int getPlayStep (int layer, int k) const { return layers[(size_t) layer].player[k & 1].currentStep(); }   // tout thread
 
     // Pour les visuels de l'UI (thread message)
     const aura::WavetableBank& getWavetables() const { return wavetables; }
@@ -71,8 +75,13 @@ private:
         aura::SampleBank::Ptr uiBank;     // derniere banque chargee (sous statusLock), pour les visuels
         int uiBankVersion = 0;
 
-        aura::StepSeq seq;
-        juce::MidiBuffer seqMidi;
+        // Arp (0) puis Seq (1) : lecteurs de motif, buffers MIDI, motifs (copie UI sous verrou + copie audio)
+        aura::PatternPlayer player[2];
+        juce::MidiBuffer playMidi[2];
+        mutable juce::SpinLock patLock;
+        aura::Pattern pat[2];
+        bool patDirty[2] { true, true };
+        aura::Pattern patRt[2];
 
         // gains du bloc precedent (rampes anti-zipper) : dry L/R, chorus L/R, delay L/R, reverb L/R
         float gPrev[8] {};
@@ -83,7 +92,7 @@ private:
 
     void setStatus (int layer, const juce::String& s);
     void fillParams (int layer, aura::Params& p) const;
-    void fillSeq (int layer, aura::SeqParams& s) const;
+    void fillPlay (int layer, int k, aura::PlayParams& s) const;
 
     struct GlobalPtrs
     {
@@ -91,17 +100,13 @@ private:
                            *choRate, *choDepth, *choRet,
                            *dlyTime, *dlyFb, *dlyDamp, *dlyPing, *dlyRet,
                            *revDecay, *revSize, *revDamp, *revPre, *revRet,
-                           *limOn, *limCeil, *limRel, *master,
-                           *arpOn, *arpMode, *arpRate, *arpOct, *arpGate, *arpSwing, *arpLatch;
+                           *limOn, *limCeil, *limRel, *master;
     } gp {};
 
     std::atomic<float>* lpPtr[aura::kLayers][aura::kNumLP] {};
 
     aura::WavetableBank wavetables;
     std::array<LayerRt, aura::kLayers> layers;
-
-    aura::Arp arp;
-    juce::MidiBuffer arpMidi;
 
     aura::fx::Saturator saturator;
     aura::fx::Chorus chorus;

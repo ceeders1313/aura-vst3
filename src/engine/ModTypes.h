@@ -6,7 +6,6 @@
 namespace aura
 {
 constexpr int kSlots = 8;
-constexpr int kSeqSteps = 16;
 
 enum Src { SrcNone = 0, SrcModEnv, SrcLfo1, SrcLfo2, SrcMseg, SrcMseg2, SrcVelocity, SrcKey,
            SrcModWheel, SrcRandom, SrcMacro1, SrcMacro2, SrcMacro3, SrcMacro4, kNumSrc };

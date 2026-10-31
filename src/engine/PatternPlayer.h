@@ -4,43 +4,42 @@
 #include <array>
 #include <atomic>
 #include <cmath>
-#include "ModTypes.h"
+#include "Pattern.h"
 
 namespace aura
 {
-struct SeqStep
-{
-    bool  on = true;
-    int   pitch = 0;           // -24 .. +24 demi-tons
-    float vel = 0.8f;          // 0 .. 1
-};
-
-struct SeqParams
+struct PlayParams
 {
     bool  on = false;
-    int   rate = 3;            // meme table que l'arp : 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32
-    int   length = kSeqSteps;
-    float gate = 0.5f;
+    int   rate = 3;              // 0 1/4, 1 1/8, 2 1/8T, 3 1/16, 4 1/16T, 5 1/32
+    int   length = 16;           // pas (1..kMaxPatSteps)
+    float gate = 0.9f;           // echelle de la longueur des notes du motif
     float swing = 0.f;
-    int   keyLo = 0, keyHi = 127, velLo = 1, velHi = 127;   // zone de la couche (appliquee aux touches)
-    SeqStep steps[kSeqSteps];
+    bool  latch = false;
+    bool  filterZone = true;     // premier etage de la chaine : applique la zone touches / velocite
+    int   keyLo = 0, keyHi = 127, velLo = 1, velHi = 127;
 };
 
-// Sequenceur pas a pas (un par couche). Les touches tenues sont rejouees a chaque pas actif,
-// transposees de la hauteur du pas ; velocite = velocite de la touche x velocite du pas.
-// Synchro sur la position ppq de l'hote quand le transport tourne, sinon horloge libre.
-class StepSeq
+// Lecteur de motif (un Arp et un Seq par couche). Rejoue un motif de piano roll a partir des
+// touches tenues, synchronise sur la position ppq de l'hote (horloge libre sinon).
+//  - Arp : row = index dans les touches tenues triees (wrap avec +12 par tour).
+//  - Seq : row = transposition en demi-tons appliquee a chaque touche tenue.
+class PatternPlayer
 {
 public:
+    enum class Kind { Arp, Seq };
+
+    explicit PatternPlayer (Kind k = Kind::Seq) : kind (k) {}
+    void setKind (Kind k) { kind = k; }
     void prepare (double sampleRate) { fs = sampleRate; reset(); }
     void reset() { hardReset(); wasOn = false; }
 
-    // Pas en cours (-1 si arrete). Lu par l'UI.
     int currentStep() const noexcept { return playStep.load (std::memory_order_relaxed); }
 
-    // Retourne true si 'out' doit remplacer 'in' pour le synthe.
+    // Retourne true si 'out' doit remplacer 'in' pour l'etage suivant.
     bool process (const juce::MidiBuffer& in, juce::MidiBuffer& out, int numSamples,
-                  const SeqParams& p, double bpm, bool playing, double ppq, bool havePpq)
+                  const PlayParams& p, const Pattern& pat,
+                  double bpm, bool playing, double ppq, bool havePpq)
     {
         if (! p.on)
         {
@@ -53,7 +52,7 @@ public:
         }
         if (! wasOn)
         {
-            out.addEvent (juce::MidiMessage::allNotesOff (1), 0);   // coupe les notes jouees en direct
+            out.addEvent (juce::MidiMessage::allNotesOff (1), 0);
             hardReset();
             wasOn = true;
         }
@@ -65,15 +64,16 @@ public:
             if (m.isNoteOn())
             {
                 const int nn = m.getNoteNumber(), v = m.getVelocity();
-                if (nn >= p.keyLo && nn <= p.keyHi && v >= p.velLo && v <= p.velHi) addHeld (nn, v);
+                if (! p.filterZone || (nn >= p.keyLo && nn <= p.keyHi && v >= p.velLo && v <= p.velHi))
+                    noteOn (nn, v, p.latch);
             }
             else if (m.isNoteOff())
             {
-                removeHeld (m.getNoteNumber());
+                noteOff (m.getNoteNumber(), p.latch);
             }
             else
             {
-                if (m.isAllNotesOff() || m.isAllSoundOff()) nHeld = 0;
+                if (m.isAllNotesOff() || m.isAllSoundOff()) { nHeld = 0; phys.fill (false); physCount = 0; }
                 out.addEvent (m, meta.samplePosition);
             }
         }
@@ -114,7 +114,7 @@ public:
             {
                 if (stepCounter > lastTriggered)
                 {
-                    trigger (t, stepCounter, stepSamples, p);
+                    trigger (t, stepCounter, stepSamples, p, pat);
                     lastTriggered = stepCounter;
                 }
                 ++stepCounter;
@@ -146,14 +146,15 @@ public:
 
 private:
     static constexpr int kMaxHeld = 16;
-    static constexpr int kMaxPend = 256;
+    static constexpr int kMaxPend = 512;
 
     struct Held { int note = 0; int vel = 0; };
     struct Ev { double t = 0; int note = 0; int vel = 0; bool on = false; };
 
     void hardReset()
     {
-        nHeld = 0; nPend = 0;
+        nHeld = 0; nPend = 0; physCount = 0;
+        phys.fill (false);
         active = false; samplesUntilStep = 0.0; stepCounter = 0; lastTriggered = -1; lastPpq = -1.0;
         playStep.store (-1, std::memory_order_relaxed);
     }
@@ -165,15 +166,21 @@ private:
         nPend = 0;
     }
 
-    void addHeld (int note, int vel)
+    void noteOn (int note, int vel, bool latch)
     {
+        if (note < 0 || note > 127) return;
+        if (latch && physCount == 0) nHeld = 0;          // nouvel accord apres relachement total
+        if (! phys[(size_t) note]) { phys[(size_t) note] = true; ++physCount; }
         for (int i = 0; i < nHeld; ++i)
             if (held[(size_t) i].note == note) { held[(size_t) i].vel = vel; return; }
         if (nHeld < kMaxHeld) held[(size_t) nHeld++] = { note, vel };
     }
 
-    void removeHeld (int note)
+    void noteOff (int note, bool latch)
     {
+        if (note < 0 || note > 127) return;
+        if (phys[(size_t) note]) { phys[(size_t) note] = false; --physCount; }
+        if (latch) return;
         int w = 0;
         for (int i = 0; i < nHeld; ++i) if (held[(size_t) i].note != note) held[(size_t) w++] = held[(size_t) i];
         nHeld = w;
@@ -185,33 +192,59 @@ private:
         pend[(size_t) nPend++] = { t, note, vel, on };
     }
 
-    void trigger (double t, long long counter, double stepSamples, const SeqParams& p)
+    void trigger (double t, long long counter, double stepSamples, const PlayParams& p, const Pattern& pat)
     {
-        const long long len = std::min (kSeqSteps, std::max (1, p.length));
+        const long long len = std::min (kMaxPatSteps, std::max (1, p.length));
         const int st = (int) (((counter % len) + len) % len);
         playStep.store (st, std::memory_order_relaxed);
 
-        const SeqStep& s = p.steps[st];
-        if (! s.on || s.vel < 0.01f) return;
+        // touches tenues triees (pour l'arp)
+        std::array<Held, kMaxHeld> sorted {};
+        for (int i = 0; i < nHeld; ++i) sorted[(size_t) i] = held[(size_t) i];
+        std::sort (sorted.begin(), sorted.begin() + nHeld, [] (const Held& a, const Held& b) { return a.note < b.note; });
 
-        const double swingOff = (counter & 1) ? double (p.swing) * 0.5 * stepSamples : 0.0;
-        const double onT  = t + swingOff;
-        const double offT = onT + std::max (8.0, double (p.gate) * stepSamples);
+        const double swingOff = (st & 1) ? double (p.swing) * 0.5 * stepSamples : 0.0;
+        const double gate = std::min (0.98, std::max (0.05, double (p.gate)));
 
-        for (int i = 0; i < nHeld; ++i)
+        for (int k = 0; k < pat.n; ++k)
         {
-            const int nn = held[(size_t) i].note + s.pitch;
-            if (nn < 0 || nn > 127) continue;
-            const int v = std::min (127, std::max (1, int (float (held[(size_t) i].vel) * s.vel + 0.5f)));
-            push (onT, nn, v, true);
-            push (offT, nn, 0, false);
+            const PatNote& pn = pat.notes[k];
+            if (pn.start != st) continue;
+
+            const double onT  = t + swingOff;
+            const double offT = onT + std::max (8.0, double (pn.len) * stepSamples * gate);
+
+            if (kind == Kind::Arp)
+            {
+                if (pn.row < 0 || nHeld == 0) continue;
+                const auto& h = sorted[(size_t) (pn.row % nHeld)];
+                const int nn = h.note + 12 * (pn.row / nHeld);
+                if (nn > 127) continue;
+                const int v = std::clamp ((int) pn.vel * h.vel / 127, 1, 127);
+                push (onT, nn, v, true);
+                push (offT, nn, 0, false);
+            }
+            else
+            {
+                for (int i = 0; i < nHeld; ++i)
+                {
+                    const int nn = held[(size_t) i].note + pn.row;
+                    if (nn < 0 || nn > 127) continue;
+                    const int v = std::clamp ((int) pn.vel * held[(size_t) i].vel / 127, 1, 127);
+                    push (onT, nn, v, true);
+                    push (offT, nn, 0, false);
+                }
+            }
         }
     }
 
+    Kind kind;
     double fs = 44100.0;
     bool wasOn = false, active = false;
     std::array<Held, kMaxHeld> held {};
     int nHeld = 0;
+    std::array<bool, 128> phys {};
+    int physCount = 0;
 
     std::array<Ev, kMaxPend> pend {};
     int nPend = 0;

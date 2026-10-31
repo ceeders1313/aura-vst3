@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 # Runtime statique : la DLL n'exige pas le redistribuable Visual C++
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(AURA VERSION 0.7.0 LANGUAGES C CXX)
+project(AURA VERSION 0.8.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

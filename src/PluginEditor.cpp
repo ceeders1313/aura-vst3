@@ -445,184 +445,6 @@ void MsegEditor::mouseDoubleClick (const juce::MouseEvent& e)
     notify();
 }
 
-// ---------------- StepSeqEditor ----------------
-static constexpr float kSeqLabelW = 58.f;
-
-StepSeqEditor::StepSeqEditor (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
-{
-    for (int i = 0; i < kSeqSteps; ++i)
-        for (int k = 0; k < 3; ++k)
-            prm[i][k] = proc.apvts.getParameter (lpId (layer, lpStep (i, k)));
-    lenParam = proc.apvts.getParameter (lpId (layer, LP_SeqLen));
-    startTimerHz (30);
-}
-
-juce::Rectangle<float> StepSeqEditor::laneRect (int lane) const
-{
-    auto a = getLocalBounds().toFloat().reduced (4.f);
-    a.removeFromLeft (kSeqLabelW);
-    auto gate = a.removeFromTop (24.f);
-    a.removeFromTop (6.f);
-    const float h = (a.getHeight() - 6.f) * 0.5f;
-    auto vel = a.removeFromTop (h);
-    a.removeFromTop (6.f);
-    if (lane == LaneGate) return gate;
-    if (lane == LaneVel)  return vel;
-    return a;
-}
-
-int StepSeqEditor::laneAt (juce::Point<float> p) const
-{
-    for (int l = 0; l < kNumLanes; ++l)
-        if (laneRect (l).expanded (0.f, 3.f).contains (p)) return l;
-    return -1;
-}
-
-int StepSeqEditor::stepAt (float x) const
-{
-    const auto r = laneRect (LaneGate);
-    return juce::jlimit (0, kSeqSteps - 1, int ((x - r.getX()) / r.getWidth() * float (kSeqSteps)));
-}
-
-float StepSeqEditor::get (int step, int part) const
-{
-    auto* p = prm[step][part];
-    return p != nullptr ? p->convertFrom0to1 (p->getValue()) : 0.f;
-}
-
-void StepSeqEditor::set (int step, int part, float value)
-{
-    auto* p = prm[step][part];
-    if (p == nullptr) return;
-    const float nv = p->convertTo0to1 (value);
-    if (std::abs (p->getValue() - nv) < 1e-6f) return;
-    p->beginChangeGesture();
-    p->setValueNotifyingHost (nv);
-    p->endChangeGesture();
-    repaint();
-}
-
-void StepSeqEditor::editAt (juce::Point<float> pt)
-{
-    const int s = stepAt (pt.x);
-    const auto r = laneRect (dragLane);
-    if (dragLane == LaneGate)
-    {
-        set (s, 0, paintOn ? 1.f : 0.f);
-    }
-    else if (dragLane == LaneVel)
-    {
-        set (s, 2, juce::jlimit (0.f, 1.f, (r.getBottom() - pt.y) / r.getHeight()));
-    }
-    else if (dragLane == LanePitch)
-    {
-        const float v = (r.getCentreY() - pt.y) / (r.getHeight() * 0.5f) * 24.f;
-        set (s, 1, (float) juce::jlimit (-24, 24, juce::roundToInt (v)));
-    }
-}
-
-void StepSeqEditor::mouseDown (const juce::MouseEvent& e)
-{
-    dragLane = laneAt (e.position);
-    if (dragLane < 0) return;
-    if (dragLane == LaneGate) paintOn = get (stepAt (e.position.x), 0) < 0.5f;
-    editAt (e.position);
-}
-
-void StepSeqEditor::mouseDrag (const juce::MouseEvent& e)
-{
-    if (dragLane >= 0) editAt (e.position);
-}
-
-void StepSeqEditor::mouseDoubleClick (const juce::MouseEvent& e)
-{
-    const int lane = laneAt (e.position);
-    const int s = stepAt (e.position.x);
-    if (lane == LaneVel)   set (s, 2, 0.8f);
-    if (lane == LanePitch) set (s, 1, 0.f);
-}
-
-void StepSeqEditor::timerCallback()
-{
-    if (! isShowing()) return;
-    const int st = proc.getSeqStep (layer);
-    if (st != lastStep || ++tick >= 6)   // pas courant + rafraichissement automation (~5 Hz)
-    {
-        lastStep = st;
-        tick = 0;
-        repaint();
-    }
-}
-
-void StepSeqEditor::paint (juce::Graphics& g)
-{
-    g.setColour (juce::Colour (0xff0d0f13));
-    g.fillRoundedRectangle (getLocalBounds().toFloat(), 4.f);
-
-    const int len = lenParam != nullptr ? juce::roundToInt (lenParam->convertFrom0to1 (lenParam->getValue())) : kSeqSteps;
-    const int cur = proc.getSeqStep (layer);
-    const juce::Colour col = ui::layerColour (layer);
-
-    static const char* const names[kNumLanes] = { "Gate", "Velocity", "Pitch" };
-    g.setFont (juce::FontOptions (12.f));
-    for (int l = 0; l < kNumLanes; ++l)
-    {
-        const auto r = laneRect (l);
-        g.setColour (ui::dim);
-        g.drawText (names[l], juce::Rectangle<float> (8.f, r.getY(), kSeqLabelW - 10.f, r.getHeight()),
-                    juce::Justification::centredLeft);
-        g.setColour (ui::panel);
-        g.fillRect (r);
-    }
-
-    const auto gate = laneRect (LaneGate), vel = laneRect (LaneVel), pit = laneRect (LanePitch);
-    const float w = gate.getWidth() / float (kSeqSteps);
-
-    for (int i = 0; i < kSeqSteps; ++i)
-    {
-        const float x = gate.getX() + float (i) * w;
-        const bool inLen = i < len;
-        const bool on = get (i, 0) > 0.5f;
-        const float alpha = inLen ? 1.f : 0.25f;
-
-        if (i == cur)
-        {
-            g.setColour (juce::Colours::white.withAlpha (0.08f));
-            g.fillRect (x, gate.getY(), w, pit.getBottom() - gate.getY());
-        }
-        if (i % 4 == 0)
-        {
-            g.setColour (ui::outline);
-            g.drawVerticalLine ((int) x, gate.getY(), pit.getBottom());
-        }
-
-        auto cell = juce::Rectangle<float> (x, gate.getY(), w, gate.getHeight()).reduced (3.f);
-        if (on) { g.setColour (col.withAlpha (alpha)); g.fillRoundedRectangle (cell, 3.f); }
-        else    { g.setColour (ui::dim.withAlpha (alpha)); g.drawRoundedRectangle (cell, 3.f, 1.f); }
-        if (i == cur && on) { g.setColour (juce::Colours::white); g.drawRoundedRectangle (cell, 3.f, 2.f); }
-
-        const float v = get (i, 2);
-        g.setColour (col.withAlpha ((on ? 0.85f : 0.3f) * alpha));
-        g.fillRect (juce::Rectangle<float> (x + 3.f, vel.getBottom() - v * vel.getHeight(), w - 6.f, v * vel.getHeight()));
-
-        const int pt = juce::roundToInt (get (i, 1));
-        const float half = pit.getHeight() * 0.5f;
-        const float py = pit.getCentreY() - float (pt) / 24.f * half;
-        g.setColour (juce::Colours::orange.withAlpha ((on ? 0.85f : 0.3f) * alpha));
-        g.fillRect (juce::Rectangle<float> (x + 3.f, std::min (py, pit.getCentreY()), w - 6.f,
-                                            std::max (2.f, std::abs (py - pit.getCentreY()))));
-        if (pt != 0)
-        {
-            g.setColour (juce::Colours::white.withAlpha (alpha));
-            g.drawText ((pt > 0 ? "+" : "") + juce::String (pt),
-                        juce::Rectangle<float> (x, pit.getY() + 2.f, w, 14.f), juce::Justification::centred);
-        }
-    }
-
-    g.setColour (ui::outline);
-    g.drawHorizontalLine ((int) pit.getCentreY(), pit.getX(), pit.getRight());
-}
-
 // ============================================================================
 // Page LAYER
 // ============================================================================
@@ -1206,41 +1028,10 @@ void MsegPane::resized()
     knobs.layout (side.removeFromTop (std::min (side.getHeight(), 110)), 1);
 }
 
-SeqPane::SeqPane (AuraProcessor& p, int layer) : knobs (*this, p.apvts), editor (p, layer)
-{
-    on.init (*this, p.apvts, lpId (layer, LP_SeqOn), "Seq on");
-    rate.init (*this, p.apvts, lpId (layer, LP_SeqRate), "Rate", kRateItems);
-    knobs.add (lpId (layer, LP_SeqLen),   "Length");
-    knobs.add (lpId (layer, LP_SeqGate),  "Gate");
-    knobs.add (lpId (layer, LP_SeqSwing), "Swing");
-    addAndMakeVisible (editor);
-
-    hint.setText ("Hold keys: active steps replay them, transposed by Pitch. Double-click resets.",
-                  juce::dontSendNotification);
-    hint.setColour (juce::Label::textColourId, ui::dim);
-    hint.setFont (juce::FontOptions (11.f));
-    addAndMakeVisible (hint);
-}
-
-void SeqPane::resized()
-{
-    auto a = getLocalBounds().reduced (6);
-    hint.setBounds (a.removeFromBottom (16));
-    auto side = a.removeFromLeft (150);
-    a.removeFromLeft (6);
-    editor.setBounds (a);
-    on.button.setBounds (side.removeFromTop (24));
-    side.removeFromTop (4);
-    auto r = side.removeFromTop (24);
-    rate.place (r, 40, 100);
-    side.removeFromTop (4);
-    knobs.layout (side, 2);
-}
-
 ModSourcesSection::ModSourcesSection (AuraProcessor& p, int layer)
     : Section ("Modulation sources", ui::layerColour (layer)),
       env (p, layer), lfo1 (p, layer, 0), lfo2 (p, layer, 1),
-      mseg1 (p, layer, 0), mseg2 (p, layer, 1), seq (p, layer)
+      mseg1 (p, layer, 0), mseg2 (p, layer, 1)
 {
     const auto bgc = ui::panel;
     tabs.addTab ("MOD ENV", bgc, &env, false);
@@ -1248,7 +1039,6 @@ ModSourcesSection::ModSourcesSection (AuraProcessor& p, int layer)
     tabs.addTab ("LFO 2",   bgc, &lfo2, false);
     tabs.addTab ("MSEG 1",  bgc, &mseg1, false);
     tabs.addTab ("MSEG 2",  bgc, &mseg2, false);
-    tabs.addTab ("STEP SEQ", bgc, &seq, false);
     tabs.setTabBarDepth (26);
     tabs.setOutline (0);
     addAndMakeVisible (tabs);
@@ -1368,6 +1158,550 @@ void LayerEditor::resized()
     matrix.setBounds (a.reduced (4));
 
     zone.setBounds (bottom.reduced (4));
+}
+
+// ============================================================================
+// Piano roll
+// ============================================================================
+static constexpr float kKeyW = 52.f, kVelH = 46.f;
+
+PianoRoll::PianoRoll (AuraProcessor& p, int layerIndex, int k) : proc (p), layer (layerIndex), kind (k)
+{
+    lenP = p.apvts.getRawParameterValue (lpId (layer, isArp() ? LP_ArpLen : LP_SeqLen));
+    topRow = isArp() ? visibleRows() - 1 : 12;
+    refresh();
+    startTimerHz (30);
+}
+
+void PianoRoll::refresh()
+{
+    pat = proc.getPattern (layer, kind);
+    repaint();
+}
+
+void PianoRoll::commit()
+{
+    proc.setPattern (layer, kind, pat);
+    repaint();
+}
+
+int PianoRoll::lengthSteps() const
+{
+    return juce::jlimit (1, kMaxPatSteps, juce::roundToInt (lenP->load()));
+}
+
+juce::Rectangle<float> PianoRoll::gridArea() const
+{
+    return getLocalBounds().toFloat().withTrimmedLeft (kKeyW).withTrimmedBottom (kVelH + 6.f);
+}
+
+juce::Rectangle<float> PianoRoll::velArea() const
+{
+    return getLocalBounds().toFloat().withTrimmedLeft (kKeyW).removeFromBottom (kVelH);
+}
+
+float PianoRoll::rowH() const { return gridArea().getHeight() / float (visibleRows()); }
+float PianoRoll::stepW() const { return gridArea().getWidth() / float (lengthSteps()); }
+float PianoRoll::rowY (int row) const { return gridArea().getY() + float (topRow - row) * rowH(); }
+
+int PianoRoll::rowAt (float y) const
+{
+    return juce::jlimit (minRow(), maxRow(), topRow - (int) std::floor ((y - gridArea().getY()) / rowH()));
+}
+
+int PianoRoll::stepAt (float x) const
+{
+    return juce::jlimit (0, lengthSteps() - 1, (int) std::floor ((x - gridArea().getX()) / stepW()));
+}
+
+juce::Rectangle<float> PianoRoll::noteRect (const PatNote& n) const
+{
+    const auto g = gridArea();
+    return { g.getX() + float (n.start) * stepW(), rowY (n.row), float (n.len) * stepW(), rowH() };
+}
+
+int PianoRoll::noteAt (juce::Point<float> p) const
+{
+    for (int i = pat.n - 1; i >= 0; --i)
+        if (noteRect (pat.notes[i]).contains (p)) return i;
+    return -1;
+}
+
+juce::String PianoRoll::rowLabel (int row) const
+{
+    if (isArp()) return "Note " + juce::String (row + 1);
+    if (row == 0) return "Root";
+    return (row > 0 ? "+" : "") + juce::String (row);
+}
+
+void PianoRoll::timerCallback()
+{
+    if (! isShowing()) return;
+    const int st = proc.getPlayStep (layer, kind);
+    if (st != lastPlay || ++tick >= 6)
+    {
+        lastPlay = st;
+        tick = 0;
+        repaint();
+    }
+}
+
+void PianoRoll::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (0xff0d0f13));
+    const auto grid = gridArea();
+    const auto col = ui::layerColour (layer);
+    const int len = lengthSteps();
+    const float rh = rowH(), sw = stepW();
+
+    // lignes (fond facon clavier) + etiquettes
+    g.setFont (juce::FontOptions (std::min (12.f, rh * 0.8f)));
+    for (int i = 0; i < visibleRows(); ++i)
+    {
+        const int row = topRow - i;
+        if (row < minRow()) break;
+        const float y = grid.getY() + float (i) * rh;
+        const int pc = ((row % 12) + 12) % 12;
+        const bool dark = isArp() ? (row / 4) % 2 == 1 : (pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10);
+        g.setColour (dark ? juce::Colour (0xff12151b) : juce::Colour (0xff171a21));
+        g.fillRect (grid.getX(), y, grid.getWidth(), rh);
+        if (! isArp() && row == 0)
+        {
+            g.setColour (col.withAlpha (0.10f));
+            g.fillRect (grid.getX(), y, grid.getWidth(), rh);
+        }
+        g.setColour (dark ? ui::panel : ui::panel2);
+        g.fillRect (0.f, y, kKeyW - 2.f, rh - 1.f);
+        g.setColour ((! isArp() && row == 0) ? col : ui::dim);
+        g.drawText (rowLabel (row), juce::Rectangle<float> (4.f, y, kKeyW - 8.f, rh), juce::Justification::centredLeft);
+        g.setColour (ui::outline.withAlpha (0.5f));
+        g.drawHorizontalLine ((int) (y + rh), grid.getX(), grid.getRight());
+    }
+
+    // colonnes, temps forts, tete de lecture
+    const int cur = proc.getPlayStep (layer, kind);
+    for (int s = 0; s <= len; ++s)
+    {
+        const float x = grid.getX() + float (s) * sw;
+        if (s == cur)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.07f));
+            g.fillRect (x, grid.getY(), sw, grid.getHeight());
+        }
+        g.setColour (s % 4 == 0 ? ui::outline.brighter (0.2f) : ui::outline.withAlpha (0.5f));
+        g.drawVerticalLine ((int) x, grid.getY(), grid.getBottom());
+    }
+
+    // notes
+    for (int i = 0; i < pat.n; ++i)
+    {
+        const auto& n = pat.notes[i];
+        if (n.start >= len || n.row > topRow || n.row <= topRow - visibleRows()) continue;
+        auto r = noteRect (n).reduced (1.f, 1.f);
+        r.setRight (std::min (r.getRight(), grid.getRight()));
+        g.setColour (col.withAlpha (0.35f + 0.65f * float (n.vel) / 127.f));
+        g.fillRoundedRectangle (r, 3.f);
+        g.setColour (i == dragNote ? juce::Colours::white : col.brighter (0.4f));
+        g.drawRoundedRectangle (r, 3.f, i == dragNote ? 1.5f : 1.f);
+    }
+    // notes hors de la vue : indicateurs
+    int above = 0, below = 0;
+    for (int i = 0; i < pat.n; ++i)
+    {
+        if (pat.notes[i].row > topRow) ++above;
+        else if (pat.notes[i].row <= topRow - visibleRows()) ++below;
+    }
+    g.setColour (ui::dim);
+    g.setFont (juce::FontOptions (11.f));
+    if (above > 0) g.drawText (juce::String (above) + " note(s) above - scroll", grid.reduced (6.f, 2.f), juce::Justification::topRight);
+    if (below > 0) g.drawText (juce::String (below) + " note(s) below - scroll", grid.reduced (6.f, 2.f), juce::Justification::bottomRight);
+
+    // ligne de velocite
+    const auto va = velArea();
+    g.setColour (ui::panel);
+    g.fillRect (va);
+    g.setColour (ui::dim);
+    g.drawText ("Vel", juce::Rectangle<float> (4.f, va.getY(), kKeyW - 8.f, va.getHeight()), juce::Justification::centredLeft);
+    for (int i = 0; i < pat.n; ++i)
+    {
+        const auto& n = pat.notes[i];
+        if (n.start >= len) continue;
+        const float h = va.getHeight() * float (n.vel) / 127.f;
+        g.setColour (col.withAlpha (0.8f));
+        g.fillRect (va.getX() + float (n.start) * sw + 2.f, va.getBottom() - h, std::max (3.f, sw * 0.4f), h);
+    }
+}
+
+void PianoRoll::setVelAt (juce::Point<float> p)
+{
+    const auto va = velArea();
+    const int s = stepAt (p.x);
+    const int v = juce::jlimit (1, 127, juce::roundToInt ((va.getBottom() - p.y) / va.getHeight() * 127.f));
+    for (int i = 0; i < pat.n; ++i)
+        if (pat.notes[i].start == s) pat.notes[i].vel = (uint8_t) v;
+    commit();
+}
+
+void PianoRoll::mouseDown (const juce::MouseEvent& e)
+{
+    const auto p = e.position;
+    if (velArea().contains (p)) { drag = DragVel; setVelAt (p); return; }
+    if (! gridArea().contains (p)) return;
+
+    const int idx = noteAt (p);
+    if (e.mods.isPopupMenu())
+    {
+        if (idx >= 0) { pat.remove (idx); dragNote = -1; commit(); }
+        return;
+    }
+    if (idx >= 0)
+    {
+        dragNote = idx;
+        const auto r = noteRect (pat.notes[idx]);
+        if (p.x > r.getRight() - std::min (8.f, r.getWidth() * 0.3f)) drag = DragResize;
+        else
+        {
+            drag = DragMove;
+            grabStep = stepAt (p.x) - pat.notes[idx].start;
+            grabRow = rowAt (p.y) - pat.notes[idx].row;
+        }
+    }
+    else
+    {
+        // creation d'une note, puis le glisser regle sa longueur
+        if (pat.add (stepAt (p.x), lastLen, rowAt (p.y), 100))
+        {
+            dragNote = pat.n - 1;
+            drag = DragResize;
+            commit();
+        }
+    }
+    repaint();
+}
+
+void PianoRoll::mouseDrag (const juce::MouseEvent& e)
+{
+    const auto p = e.position;
+    if (drag == DragVel) { setVelAt (p); return; }
+    if (dragNote < 0 || dragNote >= pat.n) return;
+    auto& n = pat.notes[dragNote];
+    if (drag == DragMove)
+    {
+        n.start = (int16_t) juce::jlimit (0, lengthSteps() - 1, stepAt (p.x) - grabStep);
+        n.row = (int8_t) juce::jlimit (minRow(), maxRow(), rowAt (p.y) - grabRow);
+    }
+    else if (drag == DragResize)
+    {
+        const int endStep = (int) std::ceil ((p.x - gridArea().getX()) / stepW());
+        n.len = (int16_t) juce::jlimit (1, kMaxPatSteps, endStep - n.start);
+    }
+    commit();
+}
+
+void PianoRoll::mouseUp (const juce::MouseEvent&)
+{
+    if (drag == DragResize && dragNote >= 0 && dragNote < pat.n) lastLen = pat.notes[dragNote].len;
+    drag = DragNone;
+}
+
+void PianoRoll::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int idx = noteAt (e.position);
+    if (idx >= 0) { pat.remove (idx); dragNote = -1; commit(); }
+}
+
+void PianoRoll::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    const int dir = w.deltaY > 0.f ? 1 : (w.deltaY < 0.f ? -1 : 0);
+    topRow = juce::jlimit (minRow() + visibleRows() - 1, maxRow(), topRow + dir);
+    repaint();
+}
+
+void PianoRoll::mouseMove (const juce::MouseEvent& e)
+{
+    const int idx = noteAt (e.position);
+    if (idx >= 0 && e.position.x > noteRect (pat.notes[idx]).getRight() - 8.f)
+        setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+    else
+        setMouseCursor (idx >= 0 ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
+}
+
+// ============================================================================
+// Page ARP / SEQ
+// ============================================================================
+SeqArpPage::SeqArpPage (AuraProcessor& p, int layerIndex)
+    : proc (p), layer (layerIndex),
+      arpPanel (p.apvts, "Arpeggiator", ui::layerColour (layerIndex), 3),
+      seqPanel (p.apvts, "Sequencer", ui::layerColour (layerIndex), 3),
+      arpRoll (p, layerIndex, AuraProcessor::kPatArp),
+      seqRoll (p, layerIndex, AuraProcessor::kPatSeq)
+{
+    const auto col = ui::layerColour (layer);
+    for (auto* b : { &arpOn, &seqOn })
+    {
+        b->setClickingTogglesState (true);
+        b->setColour (juce::TextButton::buttonOnColourId, col);
+        b->setColour (juce::TextButton::textColourOnId, ui::bg);
+        addAndMakeVisible (*b);
+    }
+    arpOnA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Arp), arpOn);
+    seqOnA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_SeqOn), seqOn);
+
+    arpPanel.addToggle (lpId (layer, LP_ArpLatch), "Latch");
+    arpPanel.addCombo (lpId (layer, LP_ArpRate), "Rate", kRateItems);
+    arpPanel.addKnob (lpId (layer, LP_ArpLen), "Steps");
+    arpPanel.addKnob (lpId (layer, LP_ArpGate), "Gate");
+    arpPanel.addKnob (lpId (layer, LP_ArpSwing), "Swing");
+    seqPanel.addCombo (lpId (layer, LP_SeqRate), "Rate", kRateItems);
+    seqPanel.addKnob (lpId (layer, LP_SeqLen), "Steps");
+    seqPanel.addKnob (lpId (layer, LP_SeqGate), "Gate");
+    seqPanel.addKnob (lpId (layer, LP_SeqSwing), "Swing");
+    addAndMakeVisible (arpPanel);
+    addAndMakeVisible (seqPanel);
+
+    static const char* const tabNames[2] = { "ARP PATTERN", "SEQ PATTERN" };
+    for (int k = 0; k < 2; ++k)
+    {
+        editTab[k].setButtonText (tabNames[k]);
+        styleToggleButton (editTab[k], col);
+        editTab[k].onClick = [this, k] { showEditor (k); };
+        addAndMakeVisible (editTab[k]);
+    }
+
+    genLabel.setText ("Generate:", juce::dontSendNotification);
+    genLabel.setColour (juce::Label::textColourId, ui::dim);
+    genLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (genLabel);
+    for (int s = 2; s <= 8; ++s) genSpan.addItem (juce::String (s) + " notes", s);
+    genSpan.setSelectedId (4, juce::dontSendNotification);
+    addAndMakeVisible (genType);
+    addAndMakeVisible (genSpan);
+
+    genBtn.onClick    = [this] { generate(); };
+    clearBtn.onClick  = [this] { proc.setPattern (layer, editing, Pattern()); roll (editing).refresh(); };
+    importBtn.onClick = [this] { importMidi(); };
+    exportBtn.onClick = [this] { exportMidi(); };
+    for (auto* b : { &genBtn, &clearBtn, &importBtn, &exportBtn }) addAndMakeVisible (*b);
+
+    addChildComponent (arpRoll);
+    addChildComponent (seqRoll);
+    showEditor (0);
+}
+
+void SeqArpPage::showEditor (int k)
+{
+    editing = k & 1;
+    for (int i = 0; i < 2; ++i) editTab[i].setToggleState (i == editing, juce::dontSendNotification);
+    arpRoll.setVisible (editing == 0);
+    seqRoll.setVisible (editing == 1);
+    roll (editing).refresh();
+
+    genType.clear (juce::dontSendNotification);
+    if (editing == 0) genType.addItemList ({ "Up", "Down", "Up/Down", "Random", "Chord" }, 1);
+    else              genType.addItemList ({ "Root every step", "Octave bounce", "Root-5th-Oct", "Random +/-12" }, 1);
+    genType.setSelectedId (1, juce::dontSendNotification);
+    genSpan.setVisible (editing == 0);
+}
+
+double SeqArpPage::stepBeats (int k) const
+{
+    static const double kRates[6] = { 1.0, 0.5, 1.0 / 3.0, 0.25, 1.0 / 6.0, 0.125 };
+    const int r = juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, k == 0 ? LP_ArpRate : LP_SeqRate))->load());
+    return kRates[juce::jlimit (0, 5, r)];
+}
+
+void SeqArpPage::generate()
+{
+    const int k = editing;
+    const int len = juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, k == 0 ? LP_ArpLen : LP_SeqLen))->load());
+    const int type = genType.getSelectedId() - 1;
+    const int span = std::max (2, genSpan.getSelectedId());
+    juce::Random rnd;
+    Pattern p;
+
+    for (int i = 0; i < len; ++i)
+    {
+        if (k == 0)
+        {
+            switch (type)
+            {
+                case 1:  p.add (i, 1, span - 1 - i % span, 100); break;
+                case 2:
+                {
+                    const int m = std::max (1, 2 * span - 2), q = i % m;
+                    p.add (i, 1, q < span ? q : m - q, 100);
+                    break;
+                }
+                case 3:  p.add (i, 1, rnd.nextInt (span), 100); break;
+                case 4:  for (int r = 0; r < span; ++r) p.add (i, 1, r, 100); break;
+                default: p.add (i, 1, i % span, 100); break;
+            }
+        }
+        else
+        {
+            static const int fifths[4] = { 0, 7, 12, 7 };
+            const int vel = (i % 4 == 0) ? 120 : 85;
+            switch (type)
+            {
+                case 1:  p.add (i, 1, (i % 2) * 12, vel); break;
+                case 2:  p.add (i, 1, fifths[i % 4], vel); break;
+                case 3:  p.add (i, 1, rnd.nextInt (25) - 12, vel); break;
+                default: p.add (i, 1, 0, vel); break;
+            }
+        }
+    }
+    proc.setPattern (layer, k, p);
+    roll (k).refresh();
+}
+
+void SeqArpPage::exportMidi()
+{
+    const int k = editing;
+    const auto def = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                         .getChildFile ("AURA_L" + juce::String (layer + 1) + (k == 0 ? "_arp.mid" : "_seq.mid"));
+    chooser = std::make_unique<juce::FileChooser> ("Export pattern as MIDI", def, "*.mid");
+    juce::Component::SafePointer<SeqArpPage> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                          | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [safe, k] (const juce::FileChooser& fc)
+                          {
+                              const auto f = fc.getResult();
+                              if (safe != nullptr && f != juce::File()) safe->writeMidi (f.withFileExtension ("mid"), k);
+                          });
+}
+
+void SeqArpPage::writeMidi (const juce::File& f, int k)
+{
+    // Convention : C4 (60) = note tenue la plus grave (Arp, +1 demi-ton par index) ou touche jouee (Seq)
+    const auto p = proc.getPattern (layer, k);
+    const int tpq = 960;
+    const double stepTicks = double (tpq) * stepBeats (k);
+
+    juce::MidiMessageSequence seq;
+    for (int i = 0; i < p.n; ++i)
+    {
+        const auto& n = p.notes[i];
+        const int note = juce::jlimit (0, 127, 60 + n.row);
+        auto on = juce::MidiMessage::noteOn (1, note, (juce::uint8) n.vel);
+        on.setTimeStamp (double (n.start) * stepTicks);
+        auto off = juce::MidiMessage::noteOff (1, note);
+        off.setTimeStamp (double (n.start + n.len) * stepTicks);
+        seq.addEvent (on);
+        seq.addEvent (off);
+    }
+    seq.updateMatchedPairs();
+
+    juce::MidiFile mf;
+    mf.setTicksPerQuarterNote (tpq);
+    mf.addTrack (seq);
+    f.deleteFile();
+    juce::FileOutputStream os (f);
+    if (os.openedOk()) mf.writeTo (os);
+}
+
+void SeqArpPage::importMidi()
+{
+    const int k = editing;
+    chooser = std::make_unique<juce::FileChooser> ("Import MIDI into pattern",
+                  juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.mid;*.midi");
+    juce::Component::SafePointer<SeqArpPage> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safe, k] (const juce::FileChooser& fc)
+                          {
+                              const auto f = fc.getResult();
+                              if (safe != nullptr && f.existsAsFile()) safe->readMidi (f, k);
+                          });
+}
+
+void SeqArpPage::readMidi (const juce::File& f, int k)
+{
+    juce::FileInputStream is (f);
+    if (! is.openedOk()) return;
+    juce::MidiFile mf;
+    if (! mf.readFrom (is)) return;
+    const int tpq = mf.getTimeFormat();
+    if (tpq <= 0) return;                       // timecode SMPTE non gere
+
+    struct N { double on, off; int note, vel; };
+    std::vector<N> notes;
+    const double stepTicks = double (tpq) * stepBeats (k);
+    for (int t = 0; t < mf.getNumTracks(); ++t)
+    {
+        juce::MidiMessageSequence s (*mf.getTrack (t));
+        s.updateMatchedPairs();
+        for (int i = 0; i < s.getNumEvents(); ++i)
+        {
+            const auto* ev = s.getEventPointer (i);
+            if (! ev->message.isNoteOn()) continue;
+            const double on = ev->message.getTimeStamp();
+            const double off = ev->noteOffObject != nullptr ? ev->noteOffObject->message.getTimeStamp() : on + stepTicks;
+            notes.push_back ({ on, off, ev->message.getNoteNumber(), (int) ev->message.getVelocity() });
+        }
+    }
+    if (notes.empty()) return;
+
+    double first = notes.front().on;
+    int lo = 127, hi = 0;
+    for (const auto& n : notes) { first = std::min (first, n.on); lo = std::min (lo, n.note); hi = std::max (hi, n.note); }
+    const double bar = double (tpq) * 4.0;
+    const double shift = std::floor (first / bar) * bar;      // cale sur la mesure du premier evenement
+
+    int root = 60;
+    if (k == 0) root = lo;                                       // Arp : la plus grave = Note 1
+    else if (lo - root < -24 || hi - root > 24) root = (hi - lo <= 48) ? lo + (hi - lo) / 2 : lo;
+
+    Pattern p;
+    int lastEnd = 1;
+    for (const auto& n : notes)
+    {
+        const int start = juce::roundToInt ((n.on - shift) / stepTicks);
+        const int len = std::max (1, juce::roundToInt ((n.off - n.on) / stepTicks));
+        if (start < 0 || start >= kMaxPatSteps) continue;
+        const int row = (k == 0) ? juce::jlimit (0, 31, n.note - root) : juce::jlimit (-24, 24, n.note - root);
+        if (p.add (start, len, row, n.vel)) lastEnd = std::max (lastEnd, start + len);
+    }
+    proc.setPattern (layer, k, p);
+    setParam (proc.apvts, lpId (layer, k == 0 ? LP_ArpLen : LP_SeqLen), (float) juce::jlimit (1, kMaxPatSteps, lastEnd));
+    roll (k).refresh();
+}
+
+void SeqArpPage::paint (juce::Graphics& g)
+{
+    g.setColour (ui::dim);
+    g.setFont (juce::FontOptions (12.f));
+    g.drawText ("Chain: keys  >  ARP  >  SEQ  >  sound.   ARP rows = held notes (1 = lowest, wraps +12).   "
+                "SEQ rows = semitones added to each held key.   Click: add / drag: move / right edge: length / "
+                "double-click or right-click: delete / wheel: scroll.",
+                juce::Rectangle<int> (0, 44, getWidth(), 18), juce::Justification::centredLeft);
+}
+
+void SeqArpPage::resized()
+{
+    auto a = getLocalBounds();
+    auto top = a.removeFromTop (40);
+    arpOn.setBounds (top.removeFromLeft (110).reduced (2, 4));
+    seqOn.setBounds (top.removeFromLeft (110).reduced (2, 4));
+    a.removeFromTop (24);
+
+    auto panels = a.removeFromTop (std::min (190, a.getHeight() / 3));
+    arpPanel.setBounds (panels.removeFromLeft (panels.getWidth() / 2).reduced (4));
+    seqPanel.setBounds (panels.reduced (4));
+
+    a.removeFromTop (6);
+    auto bar = a.removeFromTop (30);
+    for (auto& t : editTab) t.setBounds (bar.removeFromLeft (130).reduced (2, 2));
+    exportBtn.setBounds (bar.removeFromRight (120).reduced (2, 2));
+    importBtn.setBounds (bar.removeFromRight (120).reduced (2, 2));
+    clearBtn.setBounds (bar.removeFromRight (70).reduced (2, 2));
+    bar.removeFromRight (10);
+    genBtn.setBounds (bar.removeFromRight (90).reduced (2, 2));
+    genSpan.setBounds (bar.removeFromRight (90).reduced (2, 2));
+    genType.setBounds (bar.removeFromRight (150).reduced (2, 2));
+    genLabel.setBounds (bar.removeFromRight (80));
+
+    a.removeFromTop (4);
+    arpRoll.setBounds (a);
+    seqRoll.setBounds (a);
 }
 
 // ============================================================================
@@ -1827,44 +2161,6 @@ void FxPage::resized()
 }
 
 // ============================================================================
-// Page ARP
-// ============================================================================
-ArpPage::ArpPage (AuraProcessor& p) : Section ("Arpeggiator (global)"), knobs (*this, p.apvts)
-{
-    on.init (*this, p.apvts, "arpon", "Arpeggiator on");
-    latch.init (*this, p.apvts, "arplatch", "Latch");
-    mode.init (*this, p.apvts, "arpmode", "Mode", { "Up", "Down", "Up/Down", "Random", "As Played", "Chord" });
-    rate.init (*this, p.apvts, "arprate", "Rate", kRateItems);
-    knobs.add ("arpoct", "Octaves");
-    knobs.add ("arpgate", "Gate");
-    knobs.add ("arpswing", "Swing");
-
-    hint.setText ("The arpeggiator follows the host tempo and transport. Enable 'Arp' per layer "
-                  "(Routing inspector or Zone section); other layers keep playing the raw keys. "
-                  "Chain per layer: keys -> Arp -> Step seq -> sound.",
-                  juce::dontSendNotification);
-    hint.setColour (juce::Label::textColourId, ui::dim);
-    hint.setJustificationType (juce::Justification::topLeft);
-    addAndMakeVisible (hint);
-}
-
-void ArpPage::resized()
-{
-    auto a = content().reduced (6);
-    auto r1 = a.removeFromTop (28);
-    on.button.setBounds (r1.removeFromLeft (170));
-    latch.button.setBounds (r1.removeFromLeft (100));
-    a.removeFromTop (8);
-    auto r2 = a.removeFromTop (28);
-    mode.place (r2, 50, 130);
-    rate.place (r2, 50, 100);
-    a.removeFromTop (12);
-    knobs.layout (a.removeFromTop (110).removeFromLeft (360), 3);
-    a.removeFromTop (12);
-    hint.setBounds (a.removeFromTop (60));
-}
-
-// ============================================================================
 // Colonne des couches
 // ============================================================================
 LayerRow::LayerRow (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIndex)
@@ -1924,11 +2220,11 @@ void LayerRow::paint (juce::Graphics& g)
 // Editeur principal
 // ============================================================================
 AuraEditor::AuraEditor (AuraProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), routing (p), fxPage (p), arpPage (p)
+    : AudioProcessorEditor (&p), proc (p), routing (p), fxPage (p)
 {
     setLookAndFeel (&look);
 
-    static const char* const names[kNumPages] = { "LAYER", "ROUTING", "FX", "ARP" };
+    static const char* const names[kNumPages] = { "LAYER", "ARP / SEQ", "ROUTING", "FX" };
     for (int i = 0; i < kNumPages; ++i)
     {
         nav[i].setButtonText (names[i]);
@@ -1956,10 +2252,11 @@ AuraEditor::AuraEditor (AuraProcessor& p)
 
         layerEditors.push_back (std::make_unique<LayerEditor> (p, l));
         addChildComponent (*layerEditors.back());
+        seqPages.push_back (std::make_unique<SeqArpPage> (p, l));
+        addChildComponent (*seqPages.back());
     }
     addChildComponent (routing);
     addChildComponent (fxPage);
-    addChildComponent (arpPage);
     routing.onEditLayer = [this] (int l) { selectLayer (l); showPage (PageLayer); };
 
     selectLayer (0);
@@ -1991,10 +2288,12 @@ void AuraEditor::showPage (int p)
     page = juce::jlimit (0, kNumPages - 1, p);
     for (int i = 0; i < kNumPages; ++i) nav[i].setToggleState (i == page, juce::dontSendNotification);
     for (int i = 0; i < kLayers; ++i)
+    {
         layerEditors[(size_t) i]->setVisible (page == PageLayer && i == currentLayer);
+        seqPages[(size_t) i]->setVisible (page == PageSeq && i == currentLayer);
+    }
     routing.setVisible (page == PageRouting);
     fxPage.setVisible (page == PageFx);
-    arpPage.setVisible (page == PageArp);
     if (page == PageRouting) routing.select (currentLayer);
 }
 
@@ -2065,7 +2364,7 @@ void AuraEditor::resized()
 
     const auto pageArea = a.reduced (4, 6);
     for (auto& e : layerEditors) e->setBounds (pageArea);
+    for (auto& s : seqPages) s->setBounds (pageArea);
     routing.setBounds (pageArea);
     fxPage.setBounds (pageArea);
-    arpPage.setBounds (pageArea.withHeight (std::min (pageArea.getHeight(), 320)));
 }

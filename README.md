@@ -1,7 +1,18 @@
-# AURA v0.7 - colonne des couches (Mute/Solo), oscillateurs par type, page FX
+# AURA v0.8 - Arp + Seq par couche en piano roll, import / export MIDI
 
 ## Build
 GitHub Actions (build.yml inchange). Artefact : AURA-vst3-win64.
+
+## Nouveau en v0.8
+- Page ARP / SEQ (par couche, couche choisie dans la colonne de gauche) : boutons ARP et SEQ
+  (l'un, l'autre ou les deux), reglages (Rate, Steps 1-64, Gate, Swing, Latch pour l'arp),
+  piano roll en bas pour le motif ARP et le motif SEQ.
+- Arp : lignes = index des notes tenues (Note 1 = la plus grave, +12 a chaque tour). Generateurs
+  Up / Down / Up-Down / Random / Chord sur 2 a 8 notes.
+- Seq : lignes = demi-tons ajoutes a chaque touche tenue (-24..+24). Generateurs Root / Octave / 5te / Random.
+- Chaine : touches > ARP > SEQ > son. Le premier etage actif applique la zone touches / velocite.
+- Import / Export MIDI (.mid) de chaque motif. Convention : C4 = Note 1 (arp) ou touche jouee (seq).
+- L'arpegiateur global a ete supprime (les params arp sont maintenant par couche).
 
 ## Nouveau en v0.7
 - Couches empilees dans une colonne a gauche : on/off, nom, type, Mute, Solo. L'edition de la couche

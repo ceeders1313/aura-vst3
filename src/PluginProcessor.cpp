@@ -55,7 +55,7 @@ APVTS::ParameterLayout AuraProcessor::createLayout()
                         break;
                 }
             }
-            else if (lp < aura::LP_StepBase)
+            else
             {
                 const int j = (lp - aura::LP_SlotBase) / 3, t = (lp - aura::LP_SlotBase) % 3;
                 const juce::String n = prefix + "Mod " + juce::String (j + 1);
@@ -63,25 +63,8 @@ APVTS::ParameterLayout AuraProcessor::createLayout()
                 else if (t == 1) choice (id, n + " Dest", dstItems, 0);
                 else             flt (id, n + " Amount", NormalisableRange<float> (-1.f, 1.f), 0.f);
             }
-            else
-            {
-                const int j = (lp - aura::LP_StepBase) / 3, t = (lp - aura::LP_StepBase) % 3;
-                const juce::String n = prefix + "Step " + juce::String (j + 1);
-                if (t == 0)      boolean (id, n + " On", true);
-                else if (t == 1) p.push_back (std::make_unique<juce::AudioParameterInt> (pid (id), n + " Pitch", -24, 24, 0));
-                else             flt (id, n + " Velocity", NormalisableRange<float> (0.f, 1.f), 0.8f);
-            }
         }
     }
-
-    // ---- arpegiateur ----
-    boolean ("arpon", "Arp On", false);
-    choice ("arpmode", "Arp Mode", { "Up", "Down", "Up/Down", "Random", "As Played", "Chord" }, 0);
-    choice ("arprate", "Arp Rate", { "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32" }, 3);
-    p.push_back (std::make_unique<juce::AudioParameterInt> (pid ("arpoct"), "Arp Octaves", 1, 4, 1));
-    flt ("arpgate", "Arp Gate", NormalisableRange<float> (0.05f, 0.95f), 0.6f);
-    flt ("arpswing", "Arp Swing", NormalisableRange<float> (0.f, 1.f), 0.f);
-    boolean ("arplatch", "Arp Latch", false);
 
     // ---- effets ----
     boolean ("satOn", "Sat On", false);
@@ -122,7 +105,12 @@ AuraProcessor::AuraProcessor()
     {
         for (int lp = 0; lp < aura::kNumLP; ++lp)
             lpPtr[l][lp] = apvts.getRawParameterValue (aura::lpId (l, lp));
-        layers[(size_t) l].synth.setWavetables (&wavetables);
+        auto& L = layers[(size_t) l];
+        L.synth.setWavetables (&wavetables);
+        L.player[kPatArp].setKind (aura::PatternPlayer::Kind::Arp);
+        L.player[kPatSeq].setKind (aura::PatternPlayer::Kind::Seq);
+        L.pat[kPatArp] = L.patRt[kPatArp] = aura::Pattern::defaultArp();
+        L.pat[kPatSeq] = L.patRt[kPatSeq] = aura::Pattern::defaultSeq();
     }
 
     auto g = [this] (const char* id) { return apvts.getRawParameterValue (id); };
@@ -134,9 +122,6 @@ AuraProcessor::AuraProcessor()
     gp.revPre = g ("revPre"); gp.revRet = g ("revRet");
     gp.limOn = g ("limOn"); gp.limCeil = g ("limCeil"); gp.limRel = g ("limRel");
     gp.master = g ("master");
-    gp.arpOn = g ("arpon"); gp.arpMode = g ("arpmode"); gp.arpRate = g ("arprate");
-    gp.arpOct = g ("arpoct"); gp.arpGate = g ("arpgate"); gp.arpSwing = g ("arpswing");
-    gp.arpLatch = g ("arplatch");
 }
 
 void AuraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -144,8 +129,11 @@ void AuraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     for (auto& l : layers)
     {
         l.synth.prepare (sampleRate);
-        l.seq.prepare (sampleRate);
-        l.seqMidi.ensureSize (8192);
+        for (int k = 0; k < 2; ++k)
+        {
+            l.player[k].prepare (sampleRate);
+            l.playMidi[k].ensureSize (16384);
+        }
         l.gInit = false;
     }
     globalInit = false;
@@ -157,9 +145,6 @@ void AuraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     dlyBus.setSize (2, bufCap);
     revBus.setSize (2, bufCap);
     fxOut.setSize (2, bufCap);
-
-    arp.prepare (sampleRate);
-    arpMidi.ensureSize (8192);
 
     saturator.reset();
     chorus.prepare (sampleRate);
@@ -213,28 +198,22 @@ void AuraProcessor::fillParams (int l, aura::Params& p) const
     p.gain = 1.f;
 }
 
-void AuraProcessor::fillSeq (int l, aura::SeqParams& s) const
+void AuraProcessor::fillPlay (int l, int k, aura::PlayParams& s) const
 {
     using namespace aura;
     auto P = [&] (int id) { return lpPtr[l][id]->load(); };
 
-    s.on     = P (LP_SeqOn) > 0.5f;
-    s.rate   = int (P (LP_SeqRate) + 0.5f);
-    s.length = int (P (LP_SeqLen) + 0.5f);
-    s.gate   = P (LP_SeqGate);
-    s.swing  = P (LP_SeqSwing);
+    const bool arp = (k == kPatArp);
+    s.on     = P (arp ? LP_Arp : LP_SeqOn) > 0.5f;
+    s.rate   = int (P (arp ? LP_ArpRate : LP_SeqRate) + 0.5f);
+    s.length = int (P (arp ? LP_ArpLen : LP_SeqLen) + 0.5f);
+    s.gate   = P (arp ? LP_ArpGate : LP_SeqGate);
+    s.swing  = P (arp ? LP_ArpSwing : LP_SeqSwing);
+    s.latch  = arp && P (LP_ArpLatch) > 0.5f;
     s.keyLo  = int (P (LP_KeyLo) + 0.5f);
     s.keyHi  = int (P (LP_KeyHi) + 0.5f);
     s.velLo  = int (P (LP_VelLo) + 0.5f);
     s.velHi  = int (P (LP_VelHi) + 0.5f);
-    if (! s.on) return;
-    for (int i = 0; i < kSeqSteps; ++i)
-    {
-        s.steps[i].on    = P (lpStep (i, 0)) > 0.5f;
-        const float pt   = P (lpStep (i, 1));
-        s.steps[i].pitch = int (pt + (pt >= 0.f ? 0.5f : -0.5f));
-        s.steps[i].vel   = P (lpStep (i, 2));
-    }
 }
 
 static void addScaled (float* dst, const float* src, int n, float g)
@@ -279,17 +258,6 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
 
-    ArpParams ap;
-    ap.on      = gp.arpOn->load() > 0.5f;
-    ap.mode    = int (gp.arpMode->load() + 0.5f);
-    ap.rate    = int (gp.arpRate->load() + 0.5f);
-    ap.octaves = int (gp.arpOct->load() + 0.5f);
-    ap.gate    = gp.arpGate->load();
-    ap.swing   = gp.arpSwing->load();
-    ap.latch   = gp.arpLatch->load() > 0.5f;
-    arpMidi.clear();
-    arp.process (midi, arpMidi, n, ap, bpm, playing, ppq, havePpq);
-
     // ---- couches ----
     dryBus.clear(); choBus.clear(); dlyBus.clear(); revBus.clear();
 
@@ -304,7 +272,14 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
 
         if (P (LP_Enable) < 0.5f)
         {
-            if (L.wasOn) { L.synth.killAll(); L.seq.reset(); L.wasOn = false; L.gInit = false; }
+            if (L.wasOn)
+            {
+                L.synth.killAll();
+                L.player[0].reset();
+                L.player[1].reset();
+                L.wasOn = false;
+                L.gInit = false;
+            }
             continue;
         }
         L.wasOn = true;
@@ -320,21 +295,35 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
                     if (L.msegDirty[k]) { L.synth.setMseg (k, L.mseg[k]); L.msegDirty[k] = false; }
         }
 
-        // MIDI : direct ou arpege, puis sequenceur pas a pas de la couche
-        const juce::MidiBuffer& srcMidi = (P (LP_Arp) > 0.5f) ? arpMidi : midi;
-        SeqParams sp;
-        fillSeq (l, sp);
-        L.seqMidi.clear();
-        const bool useSeq = L.seq.process (srcMidi, L.seqMidi, n, sp, bpm, playing, ppq, havePpq);
+        {
+            const juce::SpinLock::ScopedTryLockType lock (L.patLock);
+            if (lock.isLocked())
+                for (int k = 0; k < 2; ++k)
+                    if (L.patDirty[k]) { L.patRt[k] = L.pat[k]; L.patDirty[k] = false; }
+        }
+
+        // MIDI : clavier -> Arp (si actif) -> Seq (si actif) -> synthe.
+        // Le premier etage actif applique la zone touches / velocite de la couche.
+        const juce::MidiBuffer* cur = &midi;
+        bool anyPlayer = false;
+        for (int k = 0; k < 2; ++k)
+        {
+            PlayParams pp;
+            fillPlay (l, k, pp);
+            pp.filterZone = ! anyPlayer;
+            L.playMidi[k].clear();
+            if (L.player[k].process (*cur, L.playMidi[k], n, pp, L.patRt[k], bpm, playing, ppq, havePpq))
+                cur = &L.playMidi[k];
+            anyPlayer = anyPlayer || pp.on;
+        }
 
         Params prm;
         fillParams (l, prm);
-        prm.zoneBypass = sp.on;
+        prm.zoneBypass = anyPlayer;
         L.synth.setParams (prm);
 
         layerBuf.clear (0, n);
-        L.synth.process (layerBuf.getWritePointer (0), layerBuf.getWritePointer (1), n,
-                         useSeq ? L.seqMidi : srcMidi);
+        L.synth.process (layerBuf.getWritePointer (0), layerBuf.getWritePointer (1), n, *cur);
 
         // mute / solo : la couche continue de jouer (timing seq/arp conserve), seul le gain tombe a 0 (rampe)
         const bool audible = P (LP_Mute) < 0.5f && (! anySolo || P (LP_Solo) > 0.5f);
@@ -435,6 +424,29 @@ juce::String AuraProcessor::getStatusText (int layer) const
     return L.status;
 }
 
+static juce::String patPropId (int layer, int k)
+{
+    return "L" + juce::String (layer + 1) + (k == 0 ? "_arpPat" : "_seqPat");
+}
+
+aura::Pattern AuraProcessor::getPattern (int layer, int k) const
+{
+    const auto& L = layers[(size_t) layer];
+    const juce::SpinLock::ScopedLockType lock (L.patLock);
+    return L.pat[k & 1];
+}
+
+void AuraProcessor::setPattern (int layer, int k, const aura::Pattern& p)
+{
+    auto& L = layers[(size_t) layer];
+    {
+        const juce::SpinLock::ScopedLockType lock (L.patLock);
+        L.pat[k & 1] = p;
+        L.patDirty[k & 1] = true;
+    }
+    apvts.state.setProperty (patPropId (layer, k & 1), p.toString(), nullptr);
+}
+
 aura::SampleBank::Ptr AuraProcessor::getUiBank (int layer, int& version) const
 {
     const auto& L = layers[(size_t) layer];
@@ -506,6 +518,12 @@ void AuraProcessor::setStateInformation (const void* data, int size)
         {
             const juce::String ms = apvts.state.getProperty (pre + "mseg" + juce::String (k + 1)).toString();
             setMseg (l, k, ms.isNotEmpty() ? aura::MsegShape::fromString (ms) : aura::MsegShape());
+        }
+        for (int k = 0; k < 2; ++k)
+        {
+            const auto def = (k == kPatArp) ? aura::Pattern::defaultArp() : aura::Pattern::defaultSeq();
+            const juce::String ps = apvts.state.getProperty (patPropId (l, k)).toString();
+            setPattern (l, k, ps.isNotEmpty() ? aura::Pattern::fromString (ps, def) : def);
         }
 
         const juce::String saved = apvts.state.getProperty (pre + "samplePaths").toString();

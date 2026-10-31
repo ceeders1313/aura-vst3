@@ -194,34 +194,49 @@ private:
     float curveStart = 0.f, dragStartY = 0.f;
 };
 
-// Grille du sequenceur : 3 lignes (Gate / Velocity / Pitch) x 16 pas, edition a la souris.
-class StepSeqEditor : public juce::Component, private juce::Timer
+// Piano roll d'un motif (Arp : lignes = index de note tenue ; Seq : lignes = demi-tons).
+class PianoRoll : public juce::Component, private juce::Timer
 {
 public:
-    StepSeqEditor (AuraProcessor&, int layer);
+    PianoRoll (AuraProcessor&, int layer, int kind);   // kind : AuraProcessor::kPatArp / kPatSeq
+    void refresh();                                     // recharge le motif depuis le processeur
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
-    void mouseUp (const juce::MouseEvent&) override { dragLane = -1; }
+    void mouseUp (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMove (const juce::MouseEvent&) override;
 
 private:
-    enum Lane { LaneGate = 0, LaneVel, LanePitch, kNumLanes };
+    enum Drag { DragNone, DragMove, DragResize, DragVel };
 
     void timerCallback() override;
-    juce::Rectangle<float> laneRect (int lane) const;
-    int laneAt (juce::Point<float> p) const;
+    void commit();
+    int lengthSteps() const;
+    int minRow() const { return isArp() ? 0 : -24; }
+    int maxRow() const { return isArp() ? 31 : 24; }
+    int visibleRows() const { return isArp() ? 16 : 25; }
+    bool isArp() const { return kind == 0; }
+    juce::Rectangle<float> gridArea() const;
+    juce::Rectangle<float> velArea() const;
+    float rowH() const;
+    float stepW() const;
+    float rowY (int row) const;
+    int rowAt (float y) const;
     int stepAt (float x) const;
-    float get (int step, int part) const;
-    void set (int step, int part, float value);
-    void editAt (juce::Point<float> p);
+    int noteAt (juce::Point<float> p) const;
+    juce::Rectangle<float> noteRect (const aura::PatNote& n) const;
+    juce::String rowLabel (int row) const;
+    void setVelAt (juce::Point<float> p);
 
     AuraProcessor& proc;
-    int layer;
-    juce::RangedAudioParameter* prm[aura::kSeqSteps][3] {};
-    juce::RangedAudioParameter* lenParam = nullptr;
-    int dragLane = -1, lastStep = -2, tick = 0;
-    bool paintOn = true;
+    int layer, kind;
+    aura::Pattern pat;
+    std::atomic<float>* lenP;
+    int topRow;
+    Drag drag = DragNone;
+    int dragNote = -1, grabStep = 0, grabRow = 0, lastLen = 1, lastPlay = -2, tick = 0;
 };
 
 // ============================================================================
@@ -385,20 +400,6 @@ private:
     juce::Label hint;
 };
 
-class SeqPane : public juce::Component
-{
-public:
-    SeqPane (AuraProcessor&, int layer);
-    void resized() override;
-
-private:
-    ToggleBox on;
-    LabeledCombo rate;
-    KnobSet knobs;
-    StepSeqEditor editor;
-    juce::Label hint;
-};
-
 class ModSourcesSection : public Section
 {
 public:
@@ -409,7 +410,6 @@ private:
     EnvPane env;
     LfoPane lfo1, lfo2;
     MsegPane mseg1, mseg2;
-    SeqPane seq;
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };   // en dernier
 };
 
@@ -580,19 +580,38 @@ private:
 };
 
 // ============================================================================
-// Page ARP
+// Page ARP / SEQ (par couche) : boutons ARP et SEQ, reglages, piano roll en bas, import/export MIDI
 // ============================================================================
-class ArpPage : public Section
+class SeqArpPage : public juce::Component
 {
 public:
-    explicit ArpPage (AuraProcessor&);
+    SeqArpPage (AuraProcessor&, int layer);
     void resized() override;
+    void paint (juce::Graphics&) override;
 
 private:
-    ToggleBox on, latch;
-    LabeledCombo mode, rate;
-    KnobSet knobs;
-    juce::Label hint;
+    void showEditor (int k);
+    void generate();
+    void importMidi();
+    void exportMidi();
+    void readMidi (const juce::File& f, int k);
+    void writeMidi (const juce::File& f, int k);
+    double stepBeats (int k) const;
+    PianoRoll& roll (int k) { return k == 0 ? arpRoll : seqRoll; }
+
+    AuraProcessor& proc;
+    int layer;
+    juce::TextButton arpOn { "ARP" }, seqOn { "SEQ" };
+    std::unique_ptr<APVTS_::ButtonAttachment> arpOnA, seqOnA;
+    ParamPanel arpPanel, seqPanel;
+    juce::TextButton editTab[2];
+    juce::ComboBox genType, genSpan;
+    juce::TextButton genBtn { "Generate" }, clearBtn { "Clear" },
+                     importBtn { "Import MIDI..." }, exportBtn { "Export MIDI..." };
+    juce::Label genLabel;
+    PianoRoll arpRoll, seqRoll;
+    int editing = 0;
+    std::unique_ptr<juce::FileChooser> chooser;
 };
 
 // ============================================================================
@@ -634,7 +653,7 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
-    enum Page { PageLayer = 0, PageRouting, PageFx, PageArp, kNumPages };
+    enum Page { PageLayer = 0, PageSeq, PageRouting, PageFx, kNumPages };
     void showPage (int p);
     void selectLayer (int l);
 
@@ -648,9 +667,9 @@ private:
 
     std::vector<std::unique_ptr<LayerRow>> rows;
     std::vector<std::unique_ptr<LayerEditor>> layerEditors;
+    std::vector<std::unique_ptr<SeqArpPage>> seqPages;
     RoutingPage routing;
     FxPage fxPage;
-    ArpPage arpPage;
 
     int page = PageLayer, currentLayer = 0;
 };
