@@ -4,16 +4,31 @@
 
 using APVTS = juce::AudioProcessorValueTreeState;
 
+// Affichage compact des valeurs : 0.9, 0.09, 12.5, 350 (pas de zeros inutiles)
+static juce::String compactValue (float v, int)
+{
+    const float a = std::abs (v);
+    auto s = juce::String (v, a >= 100.f ? 0 : (a >= 10.f ? 1 : 2));
+    if (s.containsChar ('.'))
+    {
+        s = s.trimCharactersAtEnd ("0");
+        if (s.endsWithChar ('.')) s = s.dropLastCharacters (1);
+    }
+    return s == "-0" ? juce::String ("0") : s;
+}
+
 APVTS::ParameterLayout AuraProcessor::createLayout()
 {
     using juce::NormalisableRange;
+    using namespace aura::fx;
     using RP = std::unique_ptr<juce::RangedAudioParameter>;
     std::vector<RP> p;
 
     auto pid = [] (const juce::String& s) { return juce::ParameterID { s, 1 }; };
     auto flt = [&] (const juce::String& id, const juce::String& name, NormalisableRange<float> r, float def)
     {
-        p.push_back (std::make_unique<juce::AudioParameterFloat> (pid (id), name, r, def));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (
+            pid (id), name, r, def, juce::AudioParameterFloatAttributes().withStringFromValueFunction (compactValue)));
     };
     auto choice = [&] (const juce::String& id, const juce::String& name, const juce::StringArray& items, int def)
     {
@@ -48,7 +63,9 @@ APVTS::ParameterLayout AuraProcessor::createLayout()
                             pid (id), name, (int) s.mn, (int) s.mx, (int) s.def));
                         break;
                     case aura::Kind::Choice:
-                        choice (id, name, juce::StringArray::fromTokens (s.choices, "|", ""), (int) s.def);
+                        // couche 1 sortie par defaut sur FX 1 (reverb) : les effets s'entendent tout de suite
+                        choice (id, name, juce::StringArray::fromTokens (s.choices, "|", ""),
+                                lp == aura::LP_Output ? (l == 0 ? 1 : 0) : (int) s.def);
                         break;
                     case aura::Kind::Float:
                         flt (id, name, NormalisableRange<float> (s.mn, s.mx, 0.f, s.skew), s.def);
@@ -66,32 +83,35 @@ APVTS::ParameterLayout AuraProcessor::createLayout()
         }
     }
 
-    // ---- effets ----
-    boolean ("satOn", "Sat On", false);
-    choice ("satMode", "Sat Mode", { "Tanh", "Hard Clip", "Asymmetric" }, 0);
-    flt ("satDrive", "Sat Drive", NormalisableRange<float> (0.f, 24.f), 6.f);
-    flt ("satMix", "Sat Mix", NormalisableRange<float> (0.f, 1.f), 1.f);
-
-    flt ("choRate", "Chorus Rate", NormalisableRange<float> (0.05f, 5.f, 0.f, 0.5f), 0.6f);
-    flt ("choDepth", "Chorus Depth", NormalisableRange<float> (0.f, 1.f), 0.5f);
-    flt ("choRet", "Chorus Return", NormalisableRange<float> (0.f, 1.f), 0.5f);
-
-    flt ("dlyTime", "Delay Time", NormalisableRange<float> (10.f, 1500.f, 0.f, 0.5f), 350.f);
-    flt ("dlyFb", "Delay Feedback", NormalisableRange<float> (0.f, 0.95f), 0.4f);
-    flt ("dlyDamp", "Delay Damp", NormalisableRange<float> (0.f, 1.f), 0.4f);
-    boolean ("dlyPing", "Delay PingPong", true);
-    flt ("dlyRet", "Delay Return", NormalisableRange<float> (0.f, 1.f), 0.35f);
-
-    flt ("revDecay", "Reverb Decay", NormalisableRange<float> (0.3f, 12.f, 0.f, 0.5f), 2.5f);
-    flt ("revSize", "Reverb Size", NormalisableRange<float> (0.5f, 2.f), 1.f);
-    flt ("revDamp", "Reverb Damp", NormalisableRange<float> (0.f, 1.f), 0.4f);
-    flt ("revPre", "Reverb PreDelay", NormalisableRange<float> (0.f, 100.f), 15.f);
-    flt ("revRet", "Reverb Return", NormalisableRange<float> (0.f, 1.f), 0.3f);
+    // ---- chaines FX : 4 groupes + master, 6 emplacements ----
+    // Defaut : FX 1 = Reverb, FX 2 = Delay synchro 1/8 D, master vide.
+    const auto typeNames = fxTypeNames();
+    for (int c = 0; c < kFxChains; ++c)
+    {
+        const juce::String cn = fxChainName (c) + " ";
+        for (int s = 0; s < kFxSlots; ++s)
+        {
+            int defType = FxNone;
+            if (s == 0 && c == 0) defType = FxReverb;
+            if (s == 0 && c == 1) defType = FxDelay;
+            const juce::String sn = cn + "Slot " + juce::String (s + 1);
+            choice (fxTypeId (c, s), sn + " Type", typeNames, defType);
+            boolean (fxOnId (c, s), sn + " On", true);
+            const auto& def = fxDef (defType);
+            for (int i = 0; i < kFxParams; ++i)
+            {
+                const float d = i < def.numParams ? fxToNorm (def.p[i], def.p[i].def) : 0.f;
+                p.push_back (std::make_unique<juce::AudioParameterFloat> (
+                    pid (fxParamId (c, s, i)), sn + " P" + juce::String (i + 1), NormalisableRange<float> (0.f, 1.f), d,
+                    juce::AudioParameterFloatAttributes().withStringFromValueFunction (compactValue)));
+            }
+        }
+        if (c < kFxGroups) flt (fxGainId (c), cn + "Level", NormalisableRange<float> (0.f, 1.5f), 1.f);
+    }
 
     boolean ("limOn", "Limiter On", true);
     flt ("limCeil", "Limiter Ceiling", NormalisableRange<float> (-12.f, 0.f), -0.3f);
     flt ("limRel", "Limiter Release", NormalisableRange<float> (10.f, 500.f, 0.f, 0.5f), 100.f);
-
     flt ("master", "Master", NormalisableRange<float> (0.f, 1.5f), 1.f);
 
     return { p.begin(), p.end() };
@@ -101,6 +121,7 @@ AuraProcessor::AuraProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", createLayout())
 {
+    using namespace aura::fx;
     for (int l = 0; l < aura::kLayers; ++l)
     {
         for (int lp = 0; lp < aura::kNumLP; ++lp)
@@ -113,15 +134,37 @@ AuraProcessor::AuraProcessor()
         L.pat[kPatSeq] = L.patRt[kPatSeq] = aura::Pattern::defaultSeq();
     }
 
+    for (int c = 0; c < kFxChains; ++c)
+    {
+        auto& cp = chainPtrs[c];
+        for (int s = 0; s < kFxSlots; ++s)
+        {
+            cp.type[s] = apvts.getRawParameterValue (fxTypeId (c, s));
+            cp.on[s] = apvts.getRawParameterValue (fxOnId (c, s));
+            for (int i = 0; i < kFxParams; ++i) cp.p[s][i] = apvts.getRawParameterValue (fxParamId (c, s, i));
+        }
+        if (c < kFxGroups) cp.gain = apvts.getRawParameterValue (fxGainId (c));
+    }
+
     auto g = [this] (const char* id) { return apvts.getRawParameterValue (id); };
-    gp.satOn = g ("satOn");   gp.satMode = g ("satMode"); gp.satDrive = g ("satDrive"); gp.satMix = g ("satMix");
-    gp.choRate = g ("choRate"); gp.choDepth = g ("choDepth"); gp.choRet = g ("choRet");
-    gp.dlyTime = g ("dlyTime"); gp.dlyFb = g ("dlyFb"); gp.dlyDamp = g ("dlyDamp");
-    gp.dlyPing = g ("dlyPing"); gp.dlyRet = g ("dlyRet");
-    gp.revDecay = g ("revDecay"); gp.revSize = g ("revSize"); gp.revDamp = g ("revDamp");
-    gp.revPre = g ("revPre"); gp.revRet = g ("revRet");
     gp.limOn = g ("limOn"); gp.limCeil = g ("limCeil"); gp.limRel = g ("limRel");
     gp.master = g ("master");
+
+    ensureFx();
+    startTimerHz (10);
+}
+
+AuraProcessor::~AuraProcessor()
+{
+    stopTimer();
+}
+
+void AuraProcessor::ensureFx()
+{
+    const juce::ScopedLock sl (fxAllocLock);
+    const int cap = std::max (bufCap, 16384);
+    for (int c = 0; c < aura::fx::kFxChains; ++c)
+        chains[c].ensure (chainPtrs[c], currentRate, cap);
 }
 
 void AuraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -134,22 +177,22 @@ void AuraProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
             l.player[k].prepare (sampleRate);
             l.playMidi[k].ensureSize (16384);
         }
-        l.gInit = false;
+        l.busPrev = -1;
     }
     globalInit = false;
 
     bufCap = std::max (samplesPerBlock, 16384);
     layerBuf.setSize (2, bufCap);
-    dryBus.setSize (2, bufCap);
-    choBus.setSize (2, bufCap);
-    dlyBus.setSize (2, bufCap);
-    revBus.setSize (2, bufCap);
-    fxOut.setSize (2, bufCap);
+    masterBus.setSize (2, bufCap);
+    for (auto& b : groupBus) b.setSize (2, bufCap);
 
-    saturator.reset();
-    chorus.prepare (sampleRate);
-    delayFx.prepare (sampleRate);
-    reverb.prepare (sampleRate);
+    {
+        const juce::ScopedLock sl (fxAllocLock);
+        currentRate = sampleRate;
+        for (auto& c : chains) c.prepareAll (sampleRate, bufCap);
+    }
+    ensureFx();
+
     limiter.prepare (sampleRate);
     setLatencySamples (limiter.latency());
 }
@@ -258,8 +301,10 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
 
-    // ---- couches ----
-    dryBus.clear(); choBus.clear(); dlyBus.clear(); revBus.clear();
+    // ---- couches -> bus de sortie (Master ou groupe FX 1..4) ----
+    using namespace aura::fx;
+    masterBus.clear (0, n);
+    for (auto& gb : groupBus) gb.clear (0, n);
 
     bool anySolo = false;
     for (int l = 0; l < kLayers; ++l)
@@ -278,7 +323,7 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
                 L.player[0].reset();
                 L.player[1].reset();
                 L.wasOn = false;
-                L.gInit = false;
+                L.busPrev = -1;
             }
             continue;
         }
@@ -294,7 +339,6 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
                 for (int k = 0; k < 2; ++k)
                     if (L.msegDirty[k]) { L.synth.setMseg (k, L.mseg[k]); L.msegDirty[k] = false; }
         }
-
         {
             const juce::SpinLock::ScopedTryLockType lock (L.patLock);
             if (lock.isLocked())
@@ -330,65 +374,54 @@ void AuraProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
         const float level = audible ? P (LP_Level) : 0.f;
         const float pan = juce::jlimit (-1.f, 1.f, P (LP_Pan));
         const float ang = (pan + 1.f) * 0.25f * 3.14159265f;
-        const float cl = std::cos (ang) * 1.41421356f, cr = std::sin (ang) * 1.41421356f;
-        const float sCho = P (LP_SendCho) * 0.7f, sDly = P (LP_SendDly) * 0.7f, sRev = P (LP_SendRev) * 0.7f;
+        const float g[2] = { level * std::cos (ang) * 1.41421356f, level * std::sin (ang) * 1.41421356f };
 
-        const float g[8] = { level * cl, level * cr,
-                             level * sCho * cl, level * sCho * cr,
-                             level * sDly * cl, level * sDly * cr,
-                             level * sRev * cl, level * sRev * cr };
-        if (! L.gInit) { std::copy (g, g + 8, L.gPrev); L.gInit = true; }
-
-        const float* sl = layerBuf.getReadPointer (0);
-        const float* sr = layerBuf.getReadPointer (1);
-        juce::AudioBuffer<float>* bus[4] = { &dryBus, &choBus, &dlyBus, &revBus };
-        for (int b = 0; b < 4; ++b)
-        {
-            addRamp (bus[b]->getWritePointer (0), sl, n, L.gPrev[2 * b],     g[2 * b]);
-            addRamp (bus[b]->getWritePointer (1), sr, n, L.gPrev[2 * b + 1], g[2 * b + 1]);
-        }
-        std::copy (g, g + 8, L.gPrev);
+        const int out = juce::jlimit (0, kFxGroups, int (P (LP_Output) + 0.5f));   // 0 = master, 1..4 = FX n
+        if (out != L.busPrev) { L.gPrev[0] = g[0]; L.gPrev[1] = g[1]; L.busPrev = out; }
+        auto& dst = (out == 0) ? masterBus : groupBus[out - 1];
+        addRamp (dst.getWritePointer (0), layerBuf.getReadPointer (0), n, L.gPrev[0], g[0]);
+        addRamp (dst.getWritePointer (1), layerBuf.getReadPointer (1), n, L.gPrev[1], g[1]);
+        L.gPrev[0] = g[0];
+        L.gPrev[1] = g[1];
     }
 
-    float* dL = dryBus.getWritePointer (0);
-    float* dR = dryBus.getWritePointer (1);
-    float* fL = fxOut.getWritePointer (0);
-    float* fR = fxOut.getWritePointer (1);
-
-    // ---- bus d'effets (retours avec rampe) ----
-    const float ret[3] = { gp.choRet->load(), gp.dlyRet->load(), gp.revRet->load() };
+    // ---- groupes FX -> master ----
+    FxContext ctx;
+    ctx.bpm = bpm;
     const float mg = gp.master->load();
-    if (! globalInit) { std::copy (ret, ret + 3, retPrev); masterPrev = mg; globalInit = true; }
+    if (! globalInit)
+    {
+        for (int c = 0; c < kFxGroups; ++c) groupGainPrev[c] = chainPtrs[c].gain->load();
+        masterPrev = mg;
+        globalInit = true;
+    }
+    float* mL = masterBus.getWritePointer (0);
+    float* mR = masterBus.getWritePointer (1);
+    for (int c = 0; c < kFxGroups; ++c)
+    {
+        float* gL = groupBus[c].getWritePointer (0);
+        float* gR = groupBus[c].getWritePointer (1);
+        chains[c].process (gL, gR, n, chainPtrs[c], ctx);       // toujours : les queues de reverb / delay continuent
+        const float gg = chainPtrs[c].gain->load();
+        addRamp (mL, gL, n, groupGainPrev[c], gg);
+        addRamp (mR, gR, n, groupGainPrev[c], gg);
+        groupGainPrev[c] = gg;
+    }
 
-    chorus.process (choBus.getReadPointer (0), choBus.getReadPointer (1), fL, fR, n,
-                    gp.choRate->load(), gp.choDepth->load());
-    addRamp (dL, fL, n, retPrev[0], ret[0]); addRamp (dR, fR, n, retPrev[0], ret[0]);
-
-    delayFx.process (dlyBus.getReadPointer (0), dlyBus.getReadPointer (1), fL, fR, n,
-                     gp.dlyTime->load(), gp.dlyFb->load(), gp.dlyDamp->load(), gp.dlyPing->load() > 0.5f);
-    addRamp (dL, fL, n, retPrev[1], ret[1]); addRamp (dR, fR, n, retPrev[1], ret[1]);
-
-    reverb.process (revBus.getReadPointer (0), revBus.getReadPointer (1), fL, fR, n,
-                    gp.revDecay->load(), gp.revSize->load(), gp.revDamp->load(), gp.revPre->load());
-    addRamp (dL, fL, n, retPrev[2], ret[2]); addRamp (dR, fR, n, retPrev[2], ret[2]);
-    std::copy (ret, ret + 3, retPrev);
-
-    // ---- master : saturation -> gain -> limiteur ----
-    if (gp.satOn->load() > 0.5f)
-        saturator.process (dL, dR, n, int (gp.satMode->load() + 0.5f), gp.satDrive->load(), gp.satMix->load());
-
+    // ---- chaine master -> gain -> limiteur ----
+    chains[kMasterChain].process (mL, mR, n, chainPtrs[kMasterChain], ctx);
     {
         const float step = (mg - masterPrev) / float (n);
         float gm = masterPrev;
-        for (int i = 0; i < n; ++i) { gm += step; dL[i] *= gm; dR[i] *= gm; }
+        for (int i = 0; i < n; ++i) { gm += step; mL[i] *= gm; mR[i] *= gm; }
         masterPrev = mg;
     }
 
     const float ceilLin = std::pow (10.f, gp.limCeil->load() / 20.f);
-    limiter.process (dL, dR, n, ceilLin, gp.limRel->load(), gp.limOn->load() > 0.5f);
+    limiter.process (mL, mR, n, ceilLin, gp.limRel->load(), gp.limOn->load() > 0.5f);
 
-    std::copy (dL, dL + n, buffer.getWritePointer (0));
-    std::copy (dR, dR + n, buffer.getWritePointer (1));
+    std::copy (mL, mL + n, buffer.getWritePointer (0));
+    std::copy (mR, mR + n, buffer.getWritePointer (1));
 }
 
 aura::MsegShape AuraProcessor::getMseg (int layer, int idx) const
@@ -445,6 +478,98 @@ void AuraProcessor::setPattern (int layer, int k, const aura::Pattern& p)
         L.patDirty[k & 1] = true;
     }
     apvts.state.setProperty (patPropId (layer, k & 1), p.toString(), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Noms de couches
+// ---------------------------------------------------------------------------
+juce::String AuraProcessor::getLayerName (int layer) const
+{
+    const auto n = apvts.state.getProperty ("L" + juce::String (layer + 1) + "_name").toString();
+    return n.isNotEmpty() ? n : "Layer " + juce::String (layer + 1);
+}
+
+void AuraProcessor::setLayerName (int layer, const juce::String& name)
+{
+    apvts.state.setProperty ("L" + juce::String (layer + 1) + "_name", name.trim().substring (0, 32), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Chaines FX : edition (thread message, via les parametres -> automatisable et sauve dans les presets)
+// ---------------------------------------------------------------------------
+static void setNorm (juce::AudioProcessorValueTreeState& s, const juce::String& id, float norm)
+{
+    if (auto* p = s.getParameter (id))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (norm);
+        p->endChangeGesture();
+    }
+}
+
+static float getNorm (juce::AudioProcessorValueTreeState& s, const juce::String& id)
+{
+    auto* p = s.getParameter (id);
+    return p != nullptr ? p->getValue() : 0.f;
+}
+
+int AuraProcessor::fxType (int chain, int slot) const
+{
+    return juce::jlimit (0, aura::fx::kNumFxTypes - 1, juce::roundToInt (chainPtrs[chain].type[slot]->load()));
+}
+
+void AuraProcessor::setFxDefaults (int chain, int slot, int type)
+{
+    using namespace aura::fx;
+    if (auto* tp = apvts.getParameter (fxTypeId (chain, slot))) setNorm (apvts, fxTypeId (chain, slot), tp->convertTo0to1 ((float) type));
+    setNorm (apvts, fxOnId (chain, slot), 1.f);
+    const auto& def = fxDef (type);
+    for (int i = 0; i < kFxParams; ++i)
+        setNorm (apvts, fxParamId (chain, slot, i), i < def.numParams ? fxToNorm (def.p[i], def.p[i].def) : 0.f);
+}
+
+void AuraProcessor::copySlot (int chain, int from, int to)
+{
+    using namespace aura::fx;
+    setNorm (apvts, fxTypeId (chain, to), getNorm (apvts, fxTypeId (chain, from)));
+    setNorm (apvts, fxOnId (chain, to), getNorm (apvts, fxOnId (chain, from)));
+    for (int i = 0; i < kFxParams; ++i)
+        setNorm (apvts, fxParamId (chain, to, i), getNorm (apvts, fxParamId (chain, from, i)));
+}
+
+int AuraProcessor::addFx (int chain, int type)
+{
+    using namespace aura::fx;
+    for (int s = 0; s < kFxSlots; ++s)
+    {
+        if (fxType (chain, s) != FxNone) continue;
+        setFxDefaults (chain, s, type);
+        ensureFx();
+        return s;
+    }
+    return -1;
+}
+
+void AuraProcessor::removeFx (int chain, int slot)
+{
+    using namespace aura::fx;
+    for (int s = slot; s < kFxSlots - 1; ++s) copySlot (chain, s + 1, s);
+    setFxDefaults (chain, kFxSlots - 1, FxNone);
+}
+
+void AuraProcessor::moveFx (int chain, int slot, int delta)
+{
+    using namespace aura::fx;
+    const int other = slot + delta;
+    if (other < 0 || other >= kFxSlots || fxType (chain, other) == FxNone) return;
+    float t[2 + kFxParams];
+    t[0] = getNorm (apvts, fxTypeId (chain, slot));
+    t[1] = getNorm (apvts, fxOnId (chain, slot));
+    for (int i = 0; i < kFxParams; ++i) t[2 + i] = getNorm (apvts, fxParamId (chain, slot, i));
+    copySlot (chain, other, slot);
+    setNorm (apvts, fxTypeId (chain, other), t[0]);
+    setNorm (apvts, fxOnId (chain, other), t[1]);
+    for (int i = 0; i < kFxParams; ++i) setNorm (apvts, fxParamId (chain, other, i), t[2 + i]);
 }
 
 aura::SampleBank::Ptr AuraProcessor::getUiBank (int layer, int& version) const
@@ -659,6 +784,7 @@ void AuraProcessor::applyState (const juce::ValueTree& newState)
         if (! files.isEmpty()) loadSamples (l, files);
         else                   clearSamples (l);
     }
+    ensureFx();
     ++stateVersion;
 }
 

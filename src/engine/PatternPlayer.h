@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include "Pattern.h"
 
 namespace aura
@@ -83,6 +84,16 @@ public:
         const double stepBeats = kRates[std::min (5, std::max (0, p.rate))];
         const double spb = fs * 60.0 / std::max (bpm, 20.0);
         const double stepSamples = spb * stepBeats;
+
+        // changement de Rate : effet immediat (sinon, en synchro hote, le nouveau compteur de pas
+        // est inferieur au dernier pas joue et plus rien ne sonne jusqu'a le rattraper)
+        if (stepBeats != lastStepBeats)
+        {
+            if (lastStepBeats > 0.0 && active)
+                samplesUntilStep *= stepBeats / lastStepBeats;   // horloge libre : garde la phase
+            lastTriggered = std::numeric_limits<long long>::min() / 2;
+            lastStepBeats = stepBeats;
+        }
 
         if (nHeld == 0)
         {
@@ -249,7 +260,7 @@ private:
     std::array<Ev, kMaxPend> pend {};
     int nPend = 0;
 
-    double samplesUntilStep = 0.0, lastPpq = -1.0;
+    double samplesUntilStep = 0.0, lastPpq = -1.0, lastStepBeats = 0.0;
     long long stepCounter = 0, lastTriggered = -1;
     std::atomic<int> playStep { -1 };
 };

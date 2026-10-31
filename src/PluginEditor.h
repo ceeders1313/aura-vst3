@@ -102,6 +102,7 @@ public:
     explicit Section (const juce::String& t, juce::Colour c = ui::accent) : title (t), colour (c) {}
     void paint (juce::Graphics&) override;
     juce::Rectangle<int> content() const { return getLocalBounds().reduced (8).withTrimmedTop (22); }
+    void setTitle (const juce::String& t) { if (t != title) { title = t; repaint(); } }
 
 protected:
     juce::String title;
@@ -435,17 +436,6 @@ private:
     juce::Label hSrc, hDst, hAmt;
 };
 
-class ZoneSection : public Section
-{
-public:
-    ZoneSection (AuraProcessor&, int layer);
-    void resized() override;
-
-private:
-    ToggleBox arp;
-    KnobSet knobs;
-};
-
 class LayerEditor : public juce::Component
 {
 public:
@@ -459,11 +449,79 @@ private:
     AmpSection amp;
     ModSourcesSection mods;
     MatrixSection matrix;
-    ZoneSection zone;
 };
 
 // ============================================================================
-// Page ROUTING : graphe de noeuds + inspecteur
+// Chaines FX : panneau d'un effet + editeur de chaine (ajout / retrait / on-off / ordre)
+// ============================================================================
+class EqView : public juce::Component, private juce::Timer
+{
+public:
+    EqView (APVTS_&, int chain, int slot);
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override { if (isShowing()) repaint(); }
+    std::atomic<float>* p[aura::fx::kFxParams] {};
+};
+
+class FxSlotPanel : public juce::Component
+{
+public:
+    FxSlotPanel (AuraProcessor&, int chain, int slot);
+    int preferredHeight (int width) const;
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    std::function<void()> onStructureChanged;
+
+private:
+    AuraProcessor& proc;
+    int chain, slot, type;
+    juce::ToggleButton power;
+    std::unique_ptr<APVTS_::ButtonAttachment> powerA;
+    juce::TextButton up { juce::CharPointer_UTF8 ("\xe2\x96\xb2") }, down { juce::CharPointer_UTF8 ("\xe2\x96\xbc") }, remove { "X" };
+    struct Knob
+    {
+        juce::Slider s;
+        juce::Label l;
+        std::unique_ptr<APVTS_::SliderAttachment> a;
+    };
+    std::vector<std::unique_ptr<Knob>> knobs;
+    std::unique_ptr<EqView> eq;
+};
+
+class FxChainEditor : public juce::Component, private juce::Timer
+{
+public:
+    FxChainEditor (AuraProcessor&, int chain);
+    void setChain (int c);
+    int getChain() const { return chain; }
+    void resized() override;
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override;          // detecte un changement de structure (preset, automation)
+    int computeSignature() const;
+    void rebuild();
+    void layoutContent();
+    void showAddMenu();
+
+    AuraProcessor& proc;
+    int chain;
+    juce::Label title;
+    juce::Slider groupGain;
+    juce::Label gainLabel;
+    std::unique_ptr<APVTS_::SliderAttachment> groupGainA;
+    juce::Viewport viewport;
+    juce::Component content;
+    std::vector<std::unique_ptr<FxSlotPanel>> panels;
+    juce::TextButton addBtn { "+  Add effect" };
+    juce::Label emptyHint;
+    int signature = -1;
+};
+
+// ============================================================================
+// Page ROUTING : graphe Couches -> Groupes FX -> Master FX -> OUT + inspecteur
 // ============================================================================
 class LayerNode : public juce::Component, private juce::Timer
 {
@@ -489,56 +547,31 @@ private:
     std::atomic<float> *enP, *arpP, *seqP;
 };
 
-// Bloc unique regroupant les effets en envoi (Chorus / Delay / Reverb)
-class FxBlockNode : public juce::Component
+// Noeud d'une chaine FX (groupe FX 1..4 ou Master) : liste des effets
+class FxNode : public juce::Component, private juce::Timer
 {
 public:
-    static constexpr int kFx = 3;
-    explicit FxBlockNode (APVTS_&);
-    std::function<void (int)> onSelect;      // 0..kFx-1
-    int selectedRow = -1;
-
-    static juce::Colour rowColour (int i);
-    static const char* rowName (int i);
-    juce::Point<float> inlet (int i) const;   // coordonnees du parent
-    juce::Point<float> outlet (int i) const;
-
-    void paint (juce::Graphics&) override;
-    void resized() override;
-    void mouseDown (const juce::MouseEvent&) override;
-
-private:
-    juce::Rectangle<int> rowBounds (int i) const;
-    juce::Slider ret[kFx];
-    std::unique_ptr<APVTS_::SliderAttachment> retA[kFx];
-};
-
-class MasterNode : public juce::Component, private juce::Timer
-{
-public:
-    explicit MasterNode (APVTS_&);
+    FxNode (AuraProcessor&, int chain);
     std::function<void()> onSelect;
     bool selected = false;
 
+    static juce::Colour chainColour (int chain);
     void paint (juce::Graphics&) override;
-    void resized() override;
     void mouseDown (const juce::MouseEvent&) override { if (onSelect) onSelect(); }
 
 private:
     void timerCallback() override { if (isShowing()) repaint(); }
-    juce::Slider gain;
-    std::unique_ptr<APVTS_::SliderAttachment> gainA;
-    std::atomic<float> *satOn, *limOn;
+    AuraProcessor& proc;
+    int chain;
 };
 
 class RoutingGraph : public juce::Component, private juce::Timer
 {
 public:
-    static constexpr int kFx = FxBlockNode::kFx;
-    static int masterIndex() { return aura::kLayers + kFx; }   // index de selection du master
+    static int chainIndex (int c) { return aura::kLayers + c; }   // index de selection d'une chaine
 
     explicit RoutingGraph (AuraProcessor&);
-    std::function<void (int)> onSelect;      // 0..kLayers-1 couches, puis FX, puis master
+    std::function<void (int)> onSelect;      // 0..kLayers-1 couches, puis chaines FX (4 groupes + master)
     std::function<void (int)> onEditLayer;
     void setSelected (int idx);
 
@@ -550,12 +583,11 @@ private:
 
     AuraProcessor& proc;
     std::vector<std::unique_ptr<LayerNode>> layerNodes;
-    FxBlockNode fxBlock;
-    MasterNode master;
+    std::vector<std::unique_ptr<FxNode>> fxNodes;
     juce::Rectangle<int> outBox;
 };
 
-class RoutingPage : public juce::Component
+class RoutingPage : public juce::Component, private juce::Timer
 {
 public:
     explicit RoutingPage (AuraProcessor&);
@@ -564,13 +596,16 @@ public:
     std::function<void (int)> onEditLayer;
 
 private:
+    void timerCallback() override;          // titres des panneaux = noms de couches
+    AuraProcessor& proc;
     RoutingGraph graph;
-    std::vector<std::unique_ptr<ParamPanel>> panels;
+    std::vector<std::unique_ptr<ParamPanel>> layerPanels;
+    FxChainEditor chainEditor;
     int selected = 0;
 };
 
 // ============================================================================
-// Page FX : tous les effets dans une seule fenetre
+// Page FX : chaine selectionnee en grand + sortie (limiteur, master)
 // ============================================================================
 class FxPage : public juce::Component
 {
@@ -579,7 +614,10 @@ public:
     void resized() override;
 
 private:
-    std::vector<std::unique_ptr<ParamPanel>> panels;
+    void showChain (int c);
+    juce::TextButton chainBtn[aura::fx::kFxChains];
+    FxChainEditor editor;
+    ParamPanel output;
 };
 
 // ============================================================================
@@ -607,6 +645,7 @@ private:
     juce::TextButton arpOn { "ARP" }, seqOn { "SEQ" };
     std::unique_ptr<APVTS_::ButtonAttachment> arpOnA, seqOnA;
     ParamPanel arpPanel, seqPanel;
+    Section patternBox;
     juce::TextButton editTab[2];
     juce::ComboBox genType, genSpan;
     juce::TextButton genBtn { "Generate" }, clearBtn { "Clear" },
@@ -703,12 +742,15 @@ public:
     void mouseDown (const juce::MouseEvent&) override { if (onSelect) onSelect(); }
 
 private:
-    void timerCallback() override { if (isShowing()) repaint(); }
+    void timerCallback() override;
     AuraProcessor& proc;
     int layer;
     juce::ToggleButton power;
+    juce::Label name;                    // double-clic pour renommer
     juce::TextButton mute { "M" }, solo { "S" };
+    juce::Slider level;
     std::unique_ptr<APVTS_::ButtonAttachment> powerA, muteA, soloA;
+    std::unique_ptr<APVTS_::SliderAttachment> levelA;
 };
 
 // ============================================================================
@@ -726,10 +768,12 @@ public:
     bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
-private:
     enum Page { PageLib = 0, PageLayer, PageSeq, PageRouting, PageFx, kNumPages };
     void showPage (int p);
     void selectLayer (int l);
+    void selectRoutingNode (int idx) { routing.select (idx); }
+
+private:
 
     AuraLook look;   // declare en premier : detruit en dernier
     AuraProcessor& proc;

@@ -87,11 +87,22 @@ void AuraLook::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, 
 // ============================================================================
 // Helpers
 // ============================================================================
+// Couleurs posees sur le slider lui-meme : sa zone de texte est creee avant d'avoir un parent
+// (donc avant d'heriter du LookAndFeel), d'ou le cadre blanc sinon.
+static void styleKnob (juce::Slider& s)
+{
+    s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    s.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+    s.setColour (juce::Slider::textBoxTextColourId, ui::dim);
+    s.setColour (juce::Slider::textBoxHighlightColourId, ui::accent.withAlpha (0.4f));
+    s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 56, 14);
+}
+
 void KnobSet::add (const juce::String& id, const juce::String& text)
 {
     auto k = std::make_unique<Knob>();
-    k->slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    k->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 15);
+    styleKnob (k->slider);
     k->label.setText (text, juce::dontSendNotification);
     k->label.setJustificationType (juce::Justification::centred);
     k->label.setFont (juce::FontOptions (12.f));
@@ -1122,43 +1133,17 @@ void MatrixSection::resized()
     }
 }
 
-ZoneSection::ZoneSection (AuraProcessor& p, int layer)
-    : Section ("Zone / Sends / Macros", ui::layerColour (layer)), knobs (*this, p.apvts)
-{
-    arp.init (*this, p.apvts, lpId (layer, LP_Arp), "Arp");
-    knobs.add (lpId (layer, LP_KeyLo),     "Key Lo");
-    knobs.add (lpId (layer, LP_KeyHi),     "Key Hi");
-    knobs.add (lpId (layer, LP_VelLo),     "Vel Lo");
-    knobs.add (lpId (layer, LP_VelHi),     "Vel Hi");
-    knobs.add (lpId (layer, LP_Transpose), "Transpose");
-    knobs.add (lpId (layer, LP_SendCho),   "> Chorus");
-    knobs.add (lpId (layer, LP_SendDly),   "> Delay");
-    knobs.add (lpId (layer, LP_SendRev),   "> Reverb");
-    knobs.add (lpId (layer, LP_Macro1),    "Macro 1");
-    knobs.add (lpId (layer, LP_Macro2),    "Macro 2");
-    knobs.add (lpId (layer, LP_Macro3),    "Macro 3");
-    knobs.add (lpId (layer, LP_Macro4),    "Macro 4");
-}
-
-void ZoneSection::resized()
-{
-    auto a = content();
-    arp.button.setBounds (a.removeFromLeft (70).withSizeKeepingCentre (70, 26));
-    knobs.layout (a, 12);
-}
-
 LayerEditor::LayerEditor (AuraProcessor& p, int layer)
-    : osc (p, layer), filter (p, layer), amp (p, layer), mods (p, layer), matrix (p, layer), zone (p, layer)
+    : osc (p, layer), filter (p, layer), amp (p, layer), mods (p, layer), matrix (p, layer)
 {
-    for (auto* c : std::initializer_list<juce::Component*> { &osc, &filter, &amp, &mods, &matrix, &zone })
+    for (auto* c : std::initializer_list<juce::Component*> { &osc, &filter, &amp, &mods, &matrix })
         addAndMakeVisible (c);
 }
 
 void LayerEditor::resized()
 {
     auto a = getLocalBounds();
-    auto top = a.removeFromTop (a.getHeight() * 44 / 100);
-    auto bottom = a.removeFromBottom (122);
+    auto top = a.removeFromTop (a.getHeight() * 48 / 100);
 
     osc.setBounds (top.removeFromLeft (top.getWidth() * 50 / 100).reduced (4));
     filter.setBounds (top.removeFromLeft (top.getWidth() * 40 / 100).reduced (4));
@@ -1166,8 +1151,6 @@ void LayerEditor::resized()
 
     mods.setBounds (a.removeFromLeft (a.getWidth() * 58 / 100).reduced (4));
     matrix.setBounds (a.reduced (4));
-
-    zone.setBounds (bottom.reduced (4));
 }
 
 // ============================================================================
@@ -1448,6 +1431,8 @@ SeqArpPage::SeqArpPage (AuraProcessor& p, int layerIndex)
     : proc (p), layer (layerIndex),
       arpPanel (p.apvts, "Arpeggiator", ui::layerColour (layerIndex), 3),
       seqPanel (p.apvts, "Sequencer", ui::layerColour (layerIndex), 3),
+      patternBox ("Pattern   -   click: add  |  drag: move  |  right edge: length  |  double-click: delete  |  wheel: scroll",
+                  ui::layerColour (layerIndex)),
       arpRoll (p, layerIndex, AuraProcessor::kPatArp),
       seqRoll (p, layerIndex, AuraProcessor::kPatSeq)
 {
@@ -1500,6 +1485,10 @@ SeqArpPage::SeqArpPage (AuraProcessor& p, int layerIndex)
 
     addChildComponent (arpRoll);
     addChildComponent (seqRoll);
+    addAndMakeVisible (patternBox);
+    patternBox.toBack();                       // fond de la zone motif, sous les controles
+    arpOn.toFront (false);                     // boutons ARP / SEQ dans l'en-tete des panneaux
+    seqOn.toFront (false);
     showEditor (0);
 }
 
@@ -1680,29 +1669,20 @@ void SeqArpPage::readMidi (const juce::File& f, int k)
     roll (k).refresh();
 }
 
-void SeqArpPage::paint (juce::Graphics& g)
-{
-    g.setColour (ui::dim);
-    g.setFont (juce::FontOptions (12.f));
-    g.drawText ("Chain: keys  >  ARP  >  SEQ  >  sound.   ARP rows = held notes (1 = lowest, wraps +12).   "
-                "SEQ rows = semitones added to each held key.   Click: add / drag: move / right edge: length / "
-                "double-click or right-click: delete / wheel: scroll.",
-                juce::Rectangle<int> (0, 44, getWidth(), 18), juce::Justification::centredLeft);
-}
+void SeqArpPage::paint (juce::Graphics&) {}
 
 void SeqArpPage::resized()
 {
+    // meme organisation que la page LAYER : sections, motif en bas jusqu'au bord droit
     auto a = getLocalBounds();
-    auto top = a.removeFromTop (40);
-    arpOn.setBounds (top.removeFromLeft (110).reduced (2, 4));
-    seqOn.setBounds (top.removeFromLeft (110).reduced (2, 4));
-    a.removeFromTop (24);
-
-    auto panels = a.removeFromTop (std::min (190, a.getHeight() / 3));
+    auto panels = a.removeFromTop (std::min (200, a.getHeight() / 3));
     arpPanel.setBounds (panels.removeFromLeft (panels.getWidth() / 2).reduced (4));
     seqPanel.setBounds (panels.reduced (4));
+    arpOn.setBounds (arpPanel.getRight() - 96, arpPanel.getY() + 6, 84, 22);
+    seqOn.setBounds (seqPanel.getRight() - 96, seqPanel.getY() + 6, 84, 22);
 
-    a.removeFromTop (6);
+    patternBox.setBounds (a.reduced (4));
+    a = patternBox.getBounds().reduced (8).withTrimmedTop (24);
     auto bar = a.removeFromTop (30);
     for (auto& t : editTab) t.setBounds (bar.removeFromLeft (130).reduced (2, 2));
     exportBtn.setBounds (bar.removeFromRight (120).reduced (2, 2));
@@ -1717,6 +1697,320 @@ void SeqArpPage::resized()
     a.removeFromTop (4);
     arpRoll.setBounds (a);
     seqRoll.setBounds (a);
+}
+
+// ============================================================================
+// Chaines FX
+// ============================================================================
+using namespace aura::fx;
+
+static juce::Colour fxCategoryColour (const juce::String& cat)
+{
+    if (cat == "Filter")     return juce::Colour (0xff4fc3f7);
+    if (cat == "EQ")         return juce::Colour (0xff81c784);
+    if (cat == "Dynamics")   return juce::Colour (0xffffb74d);
+    if (cat == "Distortion") return juce::Colour (0xffe57373);
+    if (cat == "Modulation") return juce::Colour (0xffba68c8);
+    if (cat == "Delay")      return juce::Colour (0xff4db6ac);
+    if (cat == "Reverb")     return juce::Colour (0xff7986cb);
+    return juce::Colour (0xff90a4ae);
+}
+
+static const char* const kFxCategories[] = { "Filter", "EQ", "Dynamics", "Distortion", "Modulation", "Delay", "Reverb", "Utility" };
+
+// ---------------- EqView ----------------
+EqView::EqView (APVTS_& s, int chain, int slot)
+{
+    for (int i = 0; i < kFxParams; ++i) p[i] = s.getRawParameterValue (fxParamId (chain, slot, i));
+    startTimerHz (15);
+}
+
+void EqView::paint (juce::Graphics& g)
+{
+    const auto b = getLocalBounds().toFloat();
+    drawDisplayBg (g, b);
+    const auto& def = fxDef (FxEq6);
+    float real[kFxParams] {};
+    for (int i = 0; i < def.numParams; ++i) real[i] = fxToReal (def.p[i], p[i]->load());
+    Biquad bands[6];
+    bool act[6];
+    const float fs = 48000.f;
+    eqDesign (bands, real, fs, act);
+    const float outG = dbToGain (real[16]);
+
+    auto xOf = [&] (float f) { return b.getX() + std::log (f / 20.f) / std::log (1000.f) * b.getWidth(); };
+    auto yOf = [&] (float db) { return b.getCentreY() - juce::jlimit (-24.f, 24.f, db) / 24.f * b.getHeight() * 0.45f; };
+
+    g.setColour (ui::outline);
+    g.drawHorizontalLine ((int) b.getCentreY(), b.getX(), b.getRight());
+
+    juce::Path path;
+    const int steps = std::max (2, (int) b.getWidth());
+    for (int i = 0; i <= steps; ++i)
+    {
+        const float f = 20.f * std::pow (1000.f, float (i) / float (steps));
+        float mag = outG;
+        for (int k = 0; k < 6; ++k) if (act[k]) mag *= bands[k].magnitude (f, fs);
+        const float y = yOf (20.f * std::log10 (std::max (mag, 1e-6f)));
+        if (i == 0) path.startNewSubPath (xOf (f), y); else path.lineTo (xOf (f), y);
+    }
+    g.setColour (fxCategoryColour ("EQ"));
+    g.strokePath (path, juce::PathStrokeType (2.f));
+
+    const int fi[6] = { 0, 2, 5, 8, 11, 14 };
+    const int gi[6] = { 1, 3, 6, 9, 12, 15 };
+    g.setFont (juce::FontOptions (10.f));
+    for (int k = 0; k < 6; ++k)
+    {
+        const float x = xOf (real[fi[k]]), y = yOf (real[gi[k]]);
+        g.setColour (act[k] ? juce::Colours::white : ui::dim);
+        g.fillEllipse (x - 4.f, y - 4.f, 8.f, 8.f);
+        g.drawText (juce::String (k + 1), juce::Rectangle<float> (x - 8.f, y - 18.f, 16.f, 12.f), juce::Justification::centred);
+    }
+}
+
+// ---------------- FxSlotPanel ----------------
+static constexpr int kFxKnobW = 70, kFxKnobH = 70, kFxHeaderH = 28;
+
+FxSlotPanel::FxSlotPanel (AuraProcessor& p, int c, int s) : proc (p), chain (c), slot (s), type (p.fxType (c, s))
+{
+    const auto& def = fxDef (type);
+    addAndMakeVisible (power);
+    power.setTooltip ("Effect on / off");
+    powerA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, fxOnId (c, s), power);
+
+    up.setTooltip ("Move up");
+    down.setTooltip ("Move down");
+    remove.setTooltip ("Remove effect");
+    auto notify = [this]
+    {
+        juce::Component::SafePointer<FxSlotPanel> safe (this);
+        juce::MessageManager::callAsync ([safe] { if (safe != nullptr && safe->onStructureChanged) safe->onStructureChanged(); });
+    };
+    up.onClick     = [this, notify] { proc.moveFx (chain, slot, -1); notify(); };
+    down.onClick   = [this, notify] { proc.moveFx (chain, slot, 1); notify(); };
+    remove.onClick = [this, notify] { proc.removeFx (chain, slot); notify(); };
+    for (auto* b : { &up, &down, &remove }) addAndMakeVisible (*b);
+
+    for (int i = 0; i < def.numParams; ++i)
+    {
+        const FxParamSpec spec = def.p[i];
+        auto k = std::make_unique<Knob>();
+        styleKnob (k->s);
+        k->s.setColour (juce::Slider::rotarySliderFillColourId, fxCategoryColour (def.category));
+        k->l.setText (spec.name, juce::dontSendNotification);
+        k->l.setJustificationType (juce::Justification::centred);
+        k->l.setFont (juce::FontOptions (11.f));
+        k->l.setColour (juce::Label::textColourId, ui::dim);
+        addAndMakeVisible (k->s);
+        addAndMakeVisible (k->l);
+        k->a = std::make_unique<APVTS_::SliderAttachment> (p.apvts, fxParamId (c, s, i), k->s);
+        k->s.textFromValueFunction = [spec] (double v) { return fxFormat (spec, fxToReal (spec, (float) v)); };
+        k->s.valueFromTextFunction = [spec] (const juce::String& t)
+        {
+            float v = t.retainCharacters ("0123456789.-").getFloatValue();
+            if (spec.unit == Unit::Pct) v /= 100.f;
+            if (spec.unit == Unit::Hz && t.containsIgnoreCase ("k")) v *= 1000.f;
+            return (double) fxToNorm (spec, v);
+        };
+        k->s.updateText();
+        knobs.push_back (std::move (k));
+    }
+    if (type == FxEq6)
+    {
+        eq = std::make_unique<EqView> (p.apvts, c, s);
+        addAndMakeVisible (*eq);
+    }
+}
+
+int FxSlotPanel::preferredHeight (int width) const
+{
+    const int cols = std::max (1, (width - 16) / kFxKnobW);
+    const int rows = ((int) knobs.size() + cols - 1) / cols;
+    return kFxHeaderH + (eq != nullptr ? 110 : 0) + rows * kFxKnobH + 10;
+}
+
+void FxSlotPanel::paint (juce::Graphics& g)
+{
+    const auto& def = fxDef (type);
+    const auto col = fxCategoryColour (def.category);
+    const auto b = getLocalBounds().toFloat();
+    g.setColour (ui::panel2);
+    g.fillRoundedRectangle (b, 5.f);
+    g.setColour (col);
+    g.fillRoundedRectangle (b.withWidth (4.f), 2.f);
+    const bool on = power.getToggleState();
+    g.setColour (on ? ui::text : ui::dim);
+    g.setFont (juce::FontOptions (14.f, juce::Font::bold));
+    g.drawText (def.name, 36, 0, getWidth() - 150, kFxHeaderH, juce::Justification::centredLeft);
+    g.setColour (ui::dim);
+    g.setFont (juce::FontOptions (11.f));
+    g.drawText (def.category, 36, 0, getWidth() - 130, kFxHeaderH, juce::Justification::centredRight);
+    if (! on)
+    {
+        g.setColour (ui::bg.withAlpha (0.45f));
+        g.fillRoundedRectangle (b.withTrimmedTop ((float) kFxHeaderH), 5.f);
+    }
+}
+
+void FxSlotPanel::resized()
+{
+    power.setBounds (8, 3, 24, 22);
+    auto hdr = juce::Rectangle<int> (0, 0, getWidth(), kFxHeaderH).reduced (4, 3);
+    remove.setBounds (hdr.removeFromRight (26));
+    hdr.removeFromRight (2);
+    down.setBounds (hdr.removeFromRight (26));
+    up.setBounds (hdr.removeFromRight (26));
+
+    auto a = getLocalBounds().withTrimmedTop (kFxHeaderH).reduced (8, 2);
+    if (eq != nullptr)
+    {
+        eq->setBounds (a.removeFromTop (104));
+        a.removeFromTop (6);
+    }
+    const int cols = std::max (1, (getWidth() - 16) / kFxKnobW);
+    for (size_t i = 0; i < knobs.size(); ++i)
+    {
+        const int cx = a.getX() + int (i % (size_t) cols) * kFxKnobW;
+        const int cy = a.getY() + int (i / (size_t) cols) * kFxKnobH;
+        auto cell = juce::Rectangle<int> (cx, cy, kFxKnobW, kFxKnobH).reduced (2);
+        knobs[i]->l.setBounds (cell.removeFromTop (14));
+        knobs[i]->s.setBounds (cell);
+    }
+}
+
+// ---------------- FxChainEditor ----------------
+FxChainEditor::FxChainEditor (AuraProcessor& p, int c) : proc (p), chain (c)
+{
+    title.setFont (juce::FontOptions (15.f, juce::Font::bold));
+    title.setColour (juce::Label::textColourId, ui::text);
+    addAndMakeVisible (title);
+
+    groupGain.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    groupGain.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    groupGain.setPopupDisplayEnabled (true, true, nullptr);
+    addChildComponent (groupGain);
+    gainLabel.setText ("Level", juce::dontSendNotification);
+    gainLabel.setFont (juce::FontOptions (11.f));
+    gainLabel.setColour (juce::Label::textColourId, ui::dim);
+    gainLabel.setJustificationType (juce::Justification::centredRight);
+    addChildComponent (gainLabel);
+
+    viewport.setViewedComponent (&content, false);
+    viewport.setScrollBarsShown (true, false);
+    addAndMakeVisible (viewport);
+
+    addBtn.setColour (juce::TextButton::buttonColourId, ui::accent.withAlpha (0.25f));
+    addBtn.onClick = [this] { showAddMenu(); };
+    content.addAndMakeVisible (addBtn);
+    emptyHint.setText ("No effect in this chain yet. Click + to add one.", juce::dontSendNotification);
+    emptyHint.setColour (juce::Label::textColourId, ui::dim);
+    emptyHint.setJustificationType (juce::Justification::centred);
+    content.addChildComponent (emptyHint);
+
+    setChain (c);
+    startTimerHz (5);
+}
+
+void FxChainEditor::setChain (int c)
+{
+    chain = juce::jlimit (0, kFxChains - 1, c);
+    title.setText (fxChainName (chain) + (chain == kMasterChain ? "  (before output)" : "  (insert chain)"),
+                   juce::dontSendNotification);
+    groupGainA.reset();
+    const bool group = chain < kFxGroups;
+    if (group) groupGainA = std::make_unique<APVTS_::SliderAttachment> (proc.apvts, fxGainId (chain), groupGain);
+    groupGain.setVisible (group);
+    gainLabel.setVisible (group);
+    rebuild();
+}
+
+int FxChainEditor::computeSignature() const
+{
+    int h = chain + 1;
+    for (int s = 0; s < kFxSlots; ++s) h = h * 31 + proc.fxType (chain, s) + 1;
+    return h;
+}
+
+void FxChainEditor::timerCallback()
+{
+    if (computeSignature() != signature) rebuild();
+}
+
+void FxChainEditor::rebuild()
+{
+    panels.clear();
+    for (int s = 0; s < kFxSlots; ++s)
+    {
+        if (proc.fxType (chain, s) == FxNone) continue;
+        auto pnl = std::make_unique<FxSlotPanel> (proc, chain, s);
+        pnl->onStructureChanged = [this] { rebuild(); };
+        content.addAndMakeVisible (*pnl);
+        panels.push_back (std::move (pnl));
+    }
+    signature = computeSignature();
+    addBtn.setEnabled ((int) panels.size() < kFxSlots);
+    addBtn.setButtonText ((int) panels.size() < kFxSlots ? "+  Add effect" : "Chain full (6 effects)");
+    layoutContent();
+}
+
+void FxChainEditor::layoutContent()
+{
+    const int w = std::max (100, viewport.getWidth() - viewport.getScrollBarThickness() - 2);
+    int y = 0;
+    for (auto& pnl : panels)
+    {
+        const int h = pnl->preferredHeight (w);
+        pnl->setBounds (0, y, w, h);
+        y += h + 6;
+    }
+    emptyHint.setVisible (panels.empty());
+    if (panels.empty()) { emptyHint.setBounds (0, y, w, 40); y += 44; }
+    addBtn.setBounds (0, y, w, 30);
+    content.setSize (w, y + 36);
+}
+
+void FxChainEditor::showAddMenu()
+{
+    juce::PopupMenu menu;
+    for (const char* cat : kFxCategories)
+    {
+        juce::PopupMenu sub;
+        for (int t = 1; t < kNumFxTypes; ++t)
+            if (juce::String (fxDef (t).category) == cat) sub.addItem (t, fxDef (t).name);
+        menu.addSubMenu (cat, sub);
+    }
+    juce::Component::SafePointer<FxChainEditor> safe (this);
+    const int ch = chain;
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&addBtn),
+                        [safe, ch] (int result)
+                        {
+                            if (safe == nullptr || result <= 0) return;
+                            safe->proc.addFx (ch, result);
+                            safe->rebuild();
+                            safe->viewport.setViewPosition (0, safe->content.getHeight());
+                        });
+}
+
+void FxChainEditor::paint (juce::Graphics& g)
+{
+    g.setColour (ui::panel);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.f);
+    g.setColour (chain == kMasterChain ? ui::accent : FxNode::chainColour (chain));
+    g.fillRoundedRectangle (juce::Rectangle<float> (10.f, 13.f, 3.f, 14.f), 1.5f);
+}
+
+void FxChainEditor::resized()
+{
+    auto a = getLocalBounds().reduced (8);
+    auto hdr = a.removeFromTop (40);
+    hdr.removeFromLeft (10);
+    groupGain.setBounds (hdr.removeFromRight (38).withSizeKeepingCentre (36, 36));
+    gainLabel.setBounds (hdr.removeFromRight (40));
+    title.setBounds (hdr);
+    a.removeFromTop (4);
+    viewport.setBounds (a);
+    layoutContent();
 }
 
 // ============================================================================
@@ -1760,7 +2054,7 @@ LayerNode::LayerNode (AuraProcessor& p, int layerIndex) : proc (p), layer (layer
 void LayerNode::resized()
 {
     power.setBounds (4, 6, 24, 22);
-    const int kw = 40, y = getHeight() - kw - 16;
+    const int kw = 38, y = getHeight() - kw - 16;
     vol.setBounds (getWidth() / 2 - kw - 6, y, kw, kw);
     pan.setBounds (getWidth() / 2 + 6, y, kw, kw);
 }
@@ -1773,8 +2067,8 @@ void LayerNode::paint (juce::Graphics& g)
 
     g.setColour (ui::text);
     g.setFont (juce::FontOptions (13.f, juce::Font::bold));
-    g.drawText (juce::String (layer + 1) + " - Layer " + juce::String (layer + 1),
-                28, 6, getWidth() - 32, 22, juce::Justification::centredLeft);
+    g.drawText (juce::String (layer + 1) + " - " + proc.getLayerName (layer), 28, 6, getWidth() - 32, 22,
+                juce::Justification::centredLeft);
 
     g.setFont (juce::FontOptions (11.f));
     g.setColour (c);
@@ -1802,129 +2096,51 @@ void LayerNode::paint (juce::Graphics& g)
     }
 }
 
-juce::Colour FxBlockNode::rowColour (int i)
+juce::Colour FxNode::chainColour (int c)
 {
-    static const juce::uint32 c[kFx] = { 0xff9575cd, 0xff4db6ac, 0xff7986cb };
-    return juce::Colour (c[juce::jlimit (0, kFx - 1, i)]);
+    static const juce::uint32 cols[kFxGroups] = { 0xff9575cd, 0xff4db6ac, 0xff7986cb, 0xffffb74d };
+    return c >= kFxGroups ? ui::accent : juce::Colour (cols[juce::jlimit (0, kFxGroups - 1, c)]);
 }
 
-const char* FxBlockNode::rowName (int i)
+FxNode::FxNode (AuraProcessor& p, int c) : proc (p), chain (c)
 {
-    static const char* const n[kFx] = { "Chorus", "Delay", "Reverb" };
-    return n[juce::jlimit (0, kFx - 1, i)];
+    startTimerHz (4);
 }
 
-FxBlockNode::FxBlockNode (APVTS_& s)
+void FxNode::paint (juce::Graphics& g)
 {
-    static const char* const retIds[kFx] = { "choRet", "dlyRet", "revRet" };
-    for (int i = 0; i < kFx; ++i)
-    {
-        setupMiniKnob (ret[i], rowColour (i));
-        addAndMakeVisible (ret[i]);
-        retA[i] = std::make_unique<APVTS_::SliderAttachment> (s, retIds[i], ret[i]);
-    }
-}
-
-juce::Rectangle<int> FxBlockNode::rowBounds (int i) const
-{
-    const int top = 30, h = (getHeight() - top - 8) / kFx;
-    return { 8, top + i * h, getWidth() - 16, h - 4 };
-}
-
-juce::Point<float> FxBlockNode::inlet (int i) const
-{
-    return { float (getX() + getWidth() * (i + 1) / (kFx + 1)), (float) getY() };
-}
-
-juce::Point<float> FxBlockNode::outlet (int i) const
-{
-    return { float (getX() + getWidth() * (i + 1) / (kFx + 1)), (float) getBottom() };
-}
-
-void FxBlockNode::resized()
-{
-    for (int i = 0; i < kFx; ++i)
-    {
-        const auto r = rowBounds (i);
-        ret[i].setBounds (r.getRight() - r.getHeight(), r.getY(), r.getHeight(), r.getHeight());
-    }
-}
-
-void FxBlockNode::mouseDown (const juce::MouseEvent& e)
-{
-    for (int i = 0; i < kFx; ++i)
-        if (rowBounds (i).contains (e.getPosition())) { if (onSelect) onSelect (i); return; }
-    if (onSelect) onSelect (0);
-}
-
-void FxBlockNode::paint (juce::Graphics& g)
-{
-    paintNodeBox (g, getLocalBounds().toFloat(), ui::accent.withAlpha (0.7f), false);
+    paintNodeBox (g, getLocalBounds().toFloat(), chainColour (chain), selected);
     g.setColour (ui::text);
     g.setFont (juce::FontOptions (13.f, juce::Font::bold));
-    g.drawText ("FX (sends)", 10, 6, getWidth() - 20, 20, juce::Justification::centredLeft);
+    g.drawText (fxChainName (chain), 10, 6, getWidth() - 20, 20, juce::Justification::centredLeft);
 
-    for (int i = 0; i < kFx; ++i)
+    g.setFont (juce::FontOptions (11.f));
+    int y = 30, shown = 0;
+    const int maxRows = (getHeight() - 36) / 19;
+    for (int s = 0; s < kFxSlots; ++s)
     {
-        const auto r = rowBounds (i).toFloat();
-        const auto c = rowColour (i);
+        const int t = proc.fxType (chain, s);
+        if (t == FxNone) continue;
+        if (shown >= maxRows) break;
+        const bool on = proc.apvts.getRawParameterValue (fxOnId (chain, s))->load() > 0.5f;
+        const juce::Rectangle<float> r (8.f, (float) y, (float) getWidth() - 16.f, 17.f);
         g.setColour (ui::panel);
         g.fillRoundedRectangle (r, 3.f);
-        if (selectedRow == i)
-        {
-            g.setColour (juce::Colours::white);
-            g.drawRoundedRectangle (r, 3.f, 1.5f);
-        }
-        g.setColour (c);
-        g.fillRect (r.withWidth (3.f));
-        g.setColour (ui::text);
-        g.setFont (juce::FontOptions (12.f));
-        g.drawText (rowName (i), r.withTrimmedLeft (10.f), juce::Justification::centredLeft);
-        g.setColour (ui::dim);
-        g.setFont (juce::FontOptions (10.f));
-        g.drawText ("return", r.withTrimmedRight (r.getHeight() + 4.f), juce::Justification::centredRight);
-    }
-}
-
-MasterNode::MasterNode (APVTS_& s)
-{
-    setupMiniKnob (gain, ui::accent);
-    addAndMakeVisible (gain);
-    gainA = std::make_unique<APVTS_::SliderAttachment> (s, "master", gain);
-    satOn = s.getRawParameterValue ("satOn");
-    limOn = s.getRawParameterValue ("limOn");
-    startTimerHz (5);
-}
-
-void MasterNode::resized()
-{
-    gain.setBounds (getWidth() - 50, 30, 40, 40);
-}
-
-void MasterNode::paint (juce::Graphics& g)
-{
-    paintNodeBox (g, getLocalBounds().toFloat(), ui::accent, selected);
-    g.setColour (ui::text);
-    g.setFont (juce::FontOptions (13.f, juce::Font::bold));
-    g.drawText ("Master FX", 10, 6, getWidth() - 20, 20, juce::Justification::centredLeft);
-
-    g.setFont (juce::FontOptions (12.f));
-    auto item = [&] (const char* t, bool on, int y)
-    {
-        const juce::Rectangle<float> r (10.f, (float) y, (float) getWidth() - 70.f, 18.f);
-        g.setColour (ui::panel);
-        g.fillRoundedRectangle (r, 3.f);
-        g.setColour (on ? ui::accent : ui::outline);
+        g.setColour (on ? fxCategoryColour (fxDef (t).category) : ui::outline);
         g.fillRect (r.withWidth (3.f));
         g.setColour (on ? ui::text : ui::dim);
-        g.drawText (t, r.withTrimmedLeft (10.f), juce::Justification::centredLeft);
-    };
-    item ("Saturation", satOn->load() > 0.5f, 30);
-    item ("Master gain", true, 52);
-    item ("Limiter", limOn->load() > 0.5f, 74);
+        g.drawText (fxDef (t).name, r.withTrimmedLeft (9.f), juce::Justification::centredLeft);
+        y += 19;
+        ++shown;
+    }
+    if (shown == 0)
+    {
+        g.setColour (ui::dim);
+        g.drawText ("empty - click, then +", juce::Rectangle<int> (8, 30, getWidth() - 16, 18), juce::Justification::centredLeft);
+    }
 }
 
-RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p), fxBlock (p.apvts), master (p.apvts)
+RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p)
 {
     for (int l = 0; l < kLayers; ++l)
     {
@@ -1934,49 +2150,57 @@ RoutingGraph::RoutingGraph (AuraProcessor& p) : proc (p), fxBlock (p.apvts), mas
         addAndMakeVisible (*n);
         layerNodes.push_back (std::move (n));
     }
-
-    fxBlock.onSelect = [this] (int i) { if (onSelect) onSelect (kLayers + i); };
-    addAndMakeVisible (fxBlock);
-    master.onSelect = [this] { if (onSelect) onSelect (masterIndex()); };
-    addAndMakeVisible (master);
+    for (int c = 0; c < kFxChains; ++c)
+    {
+        auto n = std::make_unique<FxNode> (p, c);
+        n->onSelect = [this, c] { if (onSelect) onSelect (chainIndex (c)); };
+        addAndMakeVisible (*n);
+        fxNodes.push_back (std::move (n));
+    }
     startTimerHz (10);
 }
 
 void RoutingGraph::setSelected (int idx)
 {
-    for (int l = 0; l < kLayers; ++l) layerNodes[(size_t) l]->selected = (idx == l);
-    fxBlock.selectedRow = (idx >= kLayers && idx < kLayers + kFx) ? idx - kLayers : -1;
-    master.selected = (idx == masterIndex());
-    for (auto& n : layerNodes) n->repaint();
-    fxBlock.repaint();
-    master.repaint();
+    for (int l = 0; l < kLayers; ++l) { layerNodes[(size_t) l]->selected = (idx == l); layerNodes[(size_t) l]->repaint(); }
+    for (int c = 0; c < kFxChains; ++c) { fxNodes[(size_t) c]->selected = (idx == chainIndex (c)); fxNodes[(size_t) c]->repaint(); }
 }
 
 void RoutingGraph::resized()
 {
     const int w = getWidth(), h = getHeight();
-    const int nodeW = std::min (180, (w - 40) / kLayers - 16), nodeH = 112;
+    const int nodeW = std::min (180, (w - 40) / kLayers - 16), nodeH = 108;
     const int gap = (w - kLayers * nodeW) / (kLayers + 1);
     for (int l = 0; l < kLayers; ++l)
-        layerNodes[(size_t) l]->setBounds (gap + l * (nodeW + gap), 24, nodeW, nodeH);
+        layerNodes[(size_t) l]->setBounds (gap + l * (nodeW + gap), 16, nodeW, nodeH);
 
-    // FX a droite du centre, master au centre en bas : les cables dry passent a gauche du bloc FX
-    const int fxW = 230, fxH = 150;
-    fxBlock.setBounds (w * 62 / 100 - fxW / 2, h * 44 / 100 - fxH / 2, fxW, fxH);
+    const int gW = std::min (170, (w - 40) / kFxGroups - 16), gH = 112;
+    const int gGap = (w - kFxGroups * gW) / (kFxGroups + 1);
+    const int gY = h * 40 / 100 - gH / 2;
+    for (int c = 0; c < kFxGroups; ++c)
+        fxNodes[(size_t) c]->setBounds (gGap + c * (gW + gGap), gY, gW, gH);
 
-    const int mW = 220, mH = 100;
-    master.setBounds (w / 2 - mW / 2, h * 74 / 100 - mH / 2, mW, mH);
-    outBox = juce::Rectangle<int> (w / 2 - 40, master.getBottom() + 26, 80, 26);
+    const int mW = 230, mH = 140;
+    fxNodes[(size_t) kMasterChain]->setBounds (w / 2 - mW / 2, h * 72 / 100 - mH / 2, mW, mH);
+    outBox = juce::Rectangle<int> (w / 2 - 40, fxNodes[(size_t) kMasterChain]->getBottom() + 22, 80, 26);
 }
 
-static void drawWire (juce::Graphics& g, juce::Point<float> a, juce::Point<float> b, juce::Colour c, float amount)
+static void drawWire (juce::Graphics& g, juce::Point<float> a, juce::Point<float> b, juce::Colour c, float amount, bool faint = false)
 {
-    if (amount < 0.001f) return;
     juce::Path p;
     p.startNewSubPath (a);
     const float dy = std::max (30.f, (b.y - a.y) * 0.5f);
     p.cubicTo (a.x, a.y + dy, b.x, b.y - dy, b.x, b.y);
-    g.setColour (c.withAlpha (0.25f + 0.6f * std::min (1.f, amount)));
+    if (faint)
+    {
+        const float dash[2] = { 4.f, 4.f };
+        juce::Path d;
+        juce::PathStrokeType (1.f).createDashedStroke (d, p, dash, 2);
+        g.setColour (c.withAlpha (0.25f));
+        g.fillPath (d);
+        return;
+    }
+    g.setColour (c.withAlpha (0.3f + 0.6f * std::min (1.f, amount)));
     g.strokePath (p, juce::PathStrokeType (1.f + 3.f * std::min (1.f, amount)));
 }
 
@@ -1989,36 +2213,24 @@ void RoutingGraph::paint (juce::Graphics& g)
             g.fillRect ((float) x, (float) y, 1.5f, 1.5f);
 
     auto raw = [this] (const juce::String& id) { return proc.apvts.getRawParameterValue (id)->load(); };
-    const auto mIn = juce::Point<float> ((float) master.getBounds().getCentreX(), (float) master.getY());
+    auto topOf = [] (const juce::Component& c) { return juce::Point<float> ((float) c.getBounds().getCentreX(), (float) c.getY()); };
+    auto botOf = [] (const juce::Component& c) { return juce::Point<float> ((float) c.getBounds().getCentreX(), (float) c.getBottom()); };
+    const auto& masterNode = *fxNodes[(size_t) kMasterChain];
 
+    bool groupUsed[kFxGroups] {};
     for (int l = 0; l < kLayers; ++l)
     {
         if (raw (lpId (l, LP_Enable)) < 0.5f) continue;
-        const auto& nb = layerNodes[(size_t) l]->getBounds();
-        const auto out = juce::Point<float> ((float) nb.getCentreX(), (float) nb.getBottom());
-        const float level = raw (lpId (l, LP_Level));
-        drawWire (g, out, mIn, ui::layerColour (l), level);
-
-        const int sendIds[kFx] = { LP_SendCho, LP_SendDly, LP_SendRev };
-        for (int i = 0; i < kFx; ++i)
-            drawWire (g, out, fxBlock.inlet (i), FxBlockNode::rowColour (i), raw (lpId (l, sendIds[i])) * level);
+        const int out = juce::jlimit (0, kFxGroups, juce::roundToInt (raw (lpId (l, LP_Output))));
+        const auto& dst = out == 0 ? masterNode : *fxNodes[(size_t) out - 1];
+        if (out > 0) groupUsed[out - 1] = true;
+        drawWire (g, botOf (*layerNodes[(size_t) l]), topOf (dst), ui::layerColour (l), raw (lpId (l, LP_Level)));
     }
+    for (int c = 0; c < kFxGroups; ++c)
+        drawWire (g, botOf (*fxNodes[(size_t) c]), topOf (masterNode), FxNode::chainColour (c),
+                  raw (fxGainId (c)), ! groupUsed[c]);
 
-    static const char* const retIds[kFx] = { "choRet", "dlyRet", "revRet" };
-    for (int i = 0; i < kFx; ++i)
-        drawWire (g, fxBlock.outlet (i), mIn, FxBlockNode::rowColour (i), raw (retIds[i]));
-
-    // ports d'entree / sortie du bloc FX
-    for (int i = 0; i < kFx; ++i)
-    {
-        g.setColour (FxBlockNode::rowColour (i));
-        const auto a = fxBlock.inlet (i), b = fxBlock.outlet (i);
-        g.fillEllipse (a.x - 4.f, a.y - 4.f, 8.f, 8.f);
-        g.fillEllipse (b.x - 4.f, b.y - 4.f, 8.f, 8.f);
-    }
-
-    drawWire (g, { (float) master.getBounds().getCentreX(), (float) master.getBottom() },
-              { (float) outBox.getCentreX(), (float) outBox.getY() }, ui::accent, raw ("master"));
+    drawWire (g, botOf (masterNode), { (float) outBox.getCentreX(), (float) outBox.getY() }, ui::accent, raw ("master"));
     g.setColour (ui::panel2);
     g.fillRoundedRectangle (outBox.toFloat(), 4.f);
     g.setColour (ui::text);
@@ -2027,152 +2239,105 @@ void RoutingGraph::paint (juce::Graphics& g)
 
     g.setColour (ui::dim);
     g.setFont (juce::FontOptions (11.f));
-    g.drawText ("Click a node to edit it - double-click a layer to open its page. Wire thickness = level / send.",
+    g.drawText ("Layer > its Output (Master or FX 1-4) > Master FX > OUT.  Click a node to edit it, double-click a layer to open it.",
                 8, getHeight() - 20, getWidth() - 16, 16, juce::Justification::centredLeft);
 }
 
-RoutingPage::RoutingPage (AuraProcessor& p) : graph (p)
+RoutingPage::RoutingPage (AuraProcessor& p) : proc (p), graph (p), chainEditor (p, 0)
 {
     auto& s = p.apvts;
     for (int l = 0; l < kLayers; ++l)
     {
-        auto pp = std::make_unique<ParamPanel> (s, "Layer " + juce::String (l + 1), ui::layerColour (l), 3);
+        auto pp = std::make_unique<ParamPanel> (s, p.getLayerName (l), ui::layerColour (l), 3);
+        pp->addCombo (lpId (l, LP_Output), "Output", { "Master", "FX 1", "FX 2", "FX 3", "FX 4" });
         pp->addToggle (lpId (l, LP_Enable), "Enabled");
         pp->addToggle (lpId (l, LP_Arp), "Arpeggiator");
-        pp->addToggle (lpId (l, LP_SeqOn), "Step sequencer");
+        pp->addToggle (lpId (l, LP_SeqOn), "Sequencer");
         pp->addKnob (lpId (l, LP_Level), "Level");
         pp->addKnob (lpId (l, LP_Pan), "Pan");
         pp->addKnob (lpId (l, LP_Transpose), "Transpose");
-        pp->addKnob (lpId (l, LP_SendCho), "> Chorus");
-        pp->addKnob (lpId (l, LP_SendDly), "> Delay");
-        pp->addKnob (lpId (l, LP_SendRev), "> Reverb");
         pp->addKnob (lpId (l, LP_KeyLo), "Key Lo");
         pp->addKnob (lpId (l, LP_KeyHi), "Key Hi");
         pp->addKnob (lpId (l, LP_VelLo), "Vel Lo");
         pp->addKnob (lpId (l, LP_VelHi), "Vel Hi");
         pp->setAction ("Edit layer " + juce::String (l + 1), [this, l] { if (onEditLayer) onEditLayer (l); });
-        panels.push_back (std::move (pp));
+        addChildComponent (*pp);
+        layerPanels.push_back (std::move (pp));
     }
-
-    {
-        auto pp = std::make_unique<ParamPanel> (s, "Chorus", juce::Colour (0xff9575cd), 3);
-        pp->addKnob ("choRate", "Rate");
-        pp->addKnob ("choDepth", "Depth");
-        pp->addKnob ("choRet", "Return");
-        panels.push_back (std::move (pp));
-    }
-    {
-        auto pp = std::make_unique<ParamPanel> (s, "Delay", juce::Colour (0xff4db6ac), 2);
-        pp->addToggle ("dlyPing", "Ping-pong");
-        pp->addKnob ("dlyTime", "Time (ms)");
-        pp->addKnob ("dlyFb", "Feedback");
-        pp->addKnob ("dlyDamp", "Damping");
-        pp->addKnob ("dlyRet", "Return");
-        panels.push_back (std::move (pp));
-    }
-    {
-        auto pp = std::make_unique<ParamPanel> (s, "Reverb", juce::Colour (0xff7986cb), 3);
-        pp->addKnob ("revDecay", "Decay (s)");
-        pp->addKnob ("revSize", "Size");
-        pp->addKnob ("revDamp", "Damping");
-        pp->addKnob ("revPre", "Pre-delay");
-        pp->addKnob ("revRet", "Return");
-        panels.push_back (std::move (pp));
-    }
-    {
-        auto pp = std::make_unique<ParamPanel> (s, "Master FX", ui::accent, 3);
-        pp->addToggle ("satOn", "Saturation");
-        pp->addToggle ("limOn", "Limiter");
-        pp->addCombo ("satMode", "Sat mode", { "Tanh", "Hard Clip", "Asymmetric" });
-        pp->addKnob ("satDrive", "Drive (dB)");
-        pp->addKnob ("satMix", "Sat Mix");
-        pp->addKnob ("master", "Master");
-        pp->addKnob ("limCeil", "Ceiling (dB)");
-        pp->addKnob ("limRel", "Release (ms)");
-        panels.push_back (std::move (pp));
-    }
-
-    for (auto& pp : panels) addChildComponent (*pp);
+    addChildComponent (chainEditor);
     addAndMakeVisible (graph);
     graph.onSelect = [this] (int i) { select (i); };
     graph.onEditLayer = [this] (int l) { if (onEditLayer) onEditLayer (l); };
     select (0);
+    startTimerHz (2);
+}
+
+void RoutingPage::timerCallback()
+{
+    for (int l = 0; l < kLayers; ++l) layerPanels[(size_t) l]->setTitle (proc.getLayerName (l));
 }
 
 void RoutingPage::select (int idx)
 {
-    selected = juce::jlimit (0, (int) panels.size() - 1, idx);
-    for (size_t i = 0; i < panels.size(); ++i) panels[i]->setVisible ((int) i == selected);
+    selected = juce::jlimit (0, kLayers + kFxChains - 1, idx);
+    for (int l = 0; l < kLayers; ++l) layerPanels[(size_t) l]->setVisible (selected == l);
+    if (selected >= kLayers)
+    {
+        if (chainEditor.getChain() != selected - kLayers) chainEditor.setChain (selected - kLayers);
+        chainEditor.setVisible (true);
+    }
+    else
+    {
+        chainEditor.setVisible (false);
+    }
     graph.setSelected (selected);
 }
 
 void RoutingPage::resized()
 {
     auto a = getLocalBounds();
-    auto side = a.removeFromRight (std::min (320, a.getWidth() / 3));
-    for (auto& pp : panels) pp->setBounds (side.reduced (4));
+    auto side = a.removeFromRight (std::min (400, a.getWidth() * 36 / 100));
+    for (auto& pp : layerPanels) pp->setBounds (side.reduced (4));
+    chainEditor.setBounds (side.reduced (4));
     graph.setBounds (a.reduced (4));
 }
 
 // ============================================================================
 // Page FX
 // ============================================================================
-FxPage::FxPage (AuraProcessor& p)
+FxPage::FxPage (AuraProcessor& p) : editor (p, 0), output (p.apvts, "Output", ui::accent, 2)
 {
-    auto& s = p.apvts;
-    auto add = [&] (const juce::String& t, juce::Colour c, int cols)
+    for (int c = 0; c < kFxChains; ++c)
     {
-        panels.push_back (std::make_unique<ParamPanel> (s, t, c, cols));
-        addAndMakeVisible (*panels.back());
-        return panels.back().get();
-    };
+        chainBtn[c].setButtonText (fxChainName (c));
+        styleToggleButton (chainBtn[c], FxNode::chainColour (c));
+        chainBtn[c].onClick = [this, c] { showChain (c); };
+        addAndMakeVisible (chainBtn[c]);
+    }
+    addAndMakeVisible (editor);
+    output.addToggle ("limOn", "Limiter (look-ahead)");
+    output.addKnob ("limCeil", "Ceiling dB");
+    output.addKnob ("limRel", "Release ms");
+    output.addKnob ("master", "Master");
+    addAndMakeVisible (output);
+    showChain (0);
+}
 
-    auto* cho = add ("Chorus (send)", FxBlockNode::rowColour (0), 3);
-    cho->addKnob ("choRate", "Rate");
-    cho->addKnob ("choDepth", "Depth");
-    cho->addKnob ("choRet", "Return");
-
-    auto* dly = add ("Delay (send)", FxBlockNode::rowColour (1), 4);
-    dly->addToggle ("dlyPing", "Ping-pong");
-    dly->addKnob ("dlyTime", "Time (ms)");
-    dly->addKnob ("dlyFb", "Feedback");
-    dly->addKnob ("dlyDamp", "Damping");
-    dly->addKnob ("dlyRet", "Return");
-
-    auto* rev = add ("Reverb (send)", FxBlockNode::rowColour (2), 5);
-    rev->addKnob ("revDecay", "Decay (s)");
-    rev->addKnob ("revSize", "Size");
-    rev->addKnob ("revDamp", "Damping");
-    rev->addKnob ("revPre", "Pre-delay");
-    rev->addKnob ("revRet", "Return");
-
-    auto* sat = add ("Saturation (master)", ui::accent, 2);
-    sat->addToggle ("satOn", "On");
-    sat->addCombo ("satMode", "Mode", { "Tanh", "Hard Clip", "Asymmetric" });
-    sat->addKnob ("satDrive", "Drive (dB)");
-    sat->addKnob ("satMix", "Mix");
-
-    auto* lim = add ("Limiter (master)", ui::accent, 2);
-    lim->addToggle ("limOn", "On");
-    lim->addKnob ("limCeil", "Ceiling (dB)");
-    lim->addKnob ("limRel", "Release (ms)");
-
-    auto* mst = add ("Master", ui::accent, 1);
-    mst->addKnob ("master", "Output");
+void FxPage::showChain (int c)
+{
+    for (int i = 0; i < kFxChains; ++i) chainBtn[i].setToggleState (i == c, juce::dontSendNotification);
+    editor.setChain (c);
 }
 
 void FxPage::resized()
 {
     auto a = getLocalBounds();
-    auto row1 = a.removeFromTop (a.getHeight() / 2);
-    const int w1 = row1.getWidth();
-    panels[0]->setBounds (row1.removeFromLeft (w1 * 28 / 100).reduced (4));
-    panels[1]->setBounds (row1.removeFromLeft (w1 * 34 / 100).reduced (4));
-    panels[2]->setBounds (row1.reduced (4));
-    const int w2 = a.getWidth();
-    panels[3]->setBounds (a.removeFromLeft (w2 * 40 / 100).reduced (4));
-    panels[4]->setBounds (a.removeFromLeft (w2 * 35 / 100).reduced (4));
-    panels[5]->setBounds (a.reduced (4));
+    auto bar = a.removeFromTop (34);
+    for (auto& b : chainBtn) b.setBounds (bar.removeFromLeft (120).reduced (3, 2));
+    a.removeFromTop (6);
+    output.setBounds (a.removeFromRight (230).withHeight (std::min (a.getHeight(), 260)).reduced (4, 0));
+    a.removeFromRight (6);
+    editor.setBounds (a);
 }
 
 // ============================================================================
@@ -2526,6 +2691,16 @@ LayerRow::LayerRow (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIn
     addAndMakeVisible (power);
     powerA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Enable), power);
 
+    name.setText (p.getLayerName (layer), juce::dontSendNotification);
+    name.setFont (juce::FontOptions (14.f, juce::Font::bold));
+    name.setEditable (false, true, false);                       // double-clic pour renommer
+    name.setTooltip ("Double-click to rename");
+    name.setColour (juce::Label::backgroundWhenEditingColourId, ui::panel2);
+    name.setColour (juce::Label::textWhenEditingColourId, ui::text);
+    name.onTextChange = [this] { proc.setLayerName (layer, name.getText()); };
+    name.addMouseListener (this, false);                         // un simple clic selectionne la couche
+    addAndMakeVisible (name);
+
     mute.setClickingTogglesState (true);
     solo.setClickingTogglesState (true);
     mute.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffe57373));
@@ -2538,15 +2713,39 @@ LayerRow::LayerRow (AuraProcessor& p, int layerIndex) : proc (p), layer (layerIn
     addAndMakeVisible (solo);
     muteA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Mute), mute);
     soloA = std::make_unique<APVTS_::ButtonAttachment> (p.apvts, lpId (layer, LP_Solo), solo);
+
+    level.setSliderStyle (juce::Slider::LinearBar);
+    level.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    level.setColour (juce::Slider::trackColourId, ui::layerColour (layer).withAlpha (0.75f));
+    level.setColour (juce::Slider::backgroundColourId, ui::bg);
+    level.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    level.setPopupDisplayEnabled (true, true, nullptr);
+    level.setTooltip ("Layer volume");
+    addAndMakeVisible (level);
+    levelA = std::make_unique<APVTS_::SliderAttachment> (p.apvts, lpId (layer, LP_Level), level);
     startTimerHz (4);
+}
+
+void LayerRow::timerCallback()
+{
+    if (! name.isBeingEdited())
+    {
+        const auto n = proc.getLayerName (layer);
+        if (n != name.getText()) name.setText (n, juce::dontSendNotification);
+    }
+    const bool on = proc.apvts.getRawParameterValue (lpId (layer, LP_Enable))->load() > 0.5f;
+    name.setColour (juce::Label::textColourId, on ? (selected ? ui::layerColour (layer) : ui::text) : ui::dim);
+    if (isShowing()) repaint();
 }
 
 void LayerRow::resized()
 {
-    power.setBounds (8, 10, 24, 22);
-    const int bs = 26, y = getHeight() / 2 - bs / 2;
-    solo.setBounds (getWidth() - bs - 8, y, bs, bs);
-    mute.setBounds (getWidth() - 2 * bs - 12, y, bs, bs);
+    power.setBounds (8, 8, 24, 22);
+    const int bs = 24;
+    solo.setBounds (getWidth() - bs - 8, 8, bs, bs);
+    mute.setBounds (getWidth() - 2 * bs - 12, 8, bs, bs);
+    name.setBounds (34, 6, getWidth() - 34 - 2 * bs - 18, 24);
+    level.setBounds (38, getHeight() - 22, getWidth() - 46, 12);
 }
 
 void LayerRow::paint (juce::Graphics& g)
@@ -2562,18 +2761,12 @@ void LayerRow::paint (juce::Graphics& g)
         g.setColour (c.withAlpha (0.6f));
         g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f, 2.5f), 5.f, 1.f);
     }
-
-    const bool on = proc.apvts.getRawParameterValue (lpId (layer, LP_Enable))->load() > 0.5f;
-    const int textW = getWidth() - 40 - 66;
-    g.setColour (on ? (selected ? c : ui::text) : ui::dim);
-    g.setFont (juce::FontOptions (14.f, juce::Font::bold));
-    g.drawText (juce::String (layer + 1) + " - Layer " + juce::String (layer + 1), 38, 8, textW, 22,
-                juce::Justification::centredLeft);
     g.setColour (ui::dim);
     g.setFont (juce::FontOptions (11.f));
-    g.drawText (ui::layerTypeText (proc.apvts, layer), 38, 30, textW, 16, juce::Justification::centredLeft);
+    const int out = juce::roundToInt (proc.apvts.getRawParameterValue (lpId (layer, LP_Output))->load());
+    g.drawText (ui::layerTypeText (proc.apvts, layer) + "   >  " + (out == 0 ? juce::String ("Master") : "FX " + juce::String (out)),
+                38, 30, getWidth() - 46, 16, juce::Justification::centredLeft);
 }
-
 // ============================================================================
 // Editeur principal
 // ============================================================================
@@ -2718,7 +2911,7 @@ void AuraEditor::resized()
     auto column = a.removeFromLeft (230).reduced (6, 8);
     for (auto& r : rows)
     {
-        r->setBounds (column.removeFromTop (58));
+        r->setBounds (column.removeFromTop (74));
         column.removeFromTop (4);
     }
 

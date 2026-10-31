@@ -1,9 +1,9 @@
-﻿cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.22)
 
 # Runtime statique : la DLL n'exige pas le redistribuable Visual C++
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(AURA VERSION 0.9.0 LANGUAGES C CXX)
+project(AURA VERSION 0.10.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -49,3 +49,26 @@ target_link_libraries(AURA
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# Tests automatiques (rendu audio + captures UI), hors CI : -DAURA_BUILD_TESTS=ON
+option(AURA_BUILD_TESTS "Build the AuraTests console app" OFF)
+if(AURA_BUILD_TESTS)
+    juce_add_console_app(AuraTests PRODUCT_NAME "AuraTests")
+    target_sources(AuraTests PRIVATE
+        tests/AuraTests.cpp
+        src/PluginProcessor.cpp
+        src/PluginEditor.cpp
+        src/data/BankLoader.cpp
+        src/data/PresetLibrary.cpp)
+    target_include_directories(AuraTests PRIVATE src)
+    target_compile_definitions(AuraTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1
+        JucePlugin_VersionString="${PROJECT_VERSION}")
+    target_link_libraries(AuraTests PRIVATE
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+endif()

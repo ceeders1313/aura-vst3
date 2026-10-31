@@ -1,7 +1,28 @@
-# AURA v0.9 - browser de presets
+# AURA v0.10 - chaines d'effets modulaires, groupes FX, EQ 6 bandes, filtres
 
 ## Build
 GitHub Actions (build.yml inchange). Artefact : AURA-vst3-win64.
+
+## Tests locaux (avant chaque livraison)
+```
+cmake -S . -B build-tests -G "Visual Studio 17 2022" -A x64 -DAURA_BUILD_TESTS=ON
+cmake --build build-tests --config Release --target AuraTests
+build-tests\AuraTests_artefacts\Release\AuraTests.exe <dossier_captures>
+```
+Rend le processeur sans DAW et verifie : son du synthe, reverb et delay audibles, chaque effet actif et
+stable, EQ (+12 dB a 1 kHz), filtre HP, changement de Rate du seq (libre et synchro), Mute, aller-retour
+de preset, edition de chaine FX ; ecrit une capture PNG de chaque page de l'interface.
+
+## Nouveau en v0.10
+- FX : 4 groupes (FX 1-4) + Master FX (avant la sortie), 6 emplacements chacun ; on/off, monter/descendre,
+  supprimer, bouton "+" avec menu par categorie. Chaque couche choisit sa sortie (Master ou FX 1-4),
+  plusieurs couches peuvent partager un groupe. Par defaut : couche 1 -> FX 1 (Reverb), FX 2 = Delay.
+- Effets : Multi Filter (LP/HP/BP/Notch 12-24 dB), Low/High Cut, EQ 6 bandes (courbe), Compressor,
+  Saturation, Bitcrusher, Chorus, Phaser, Delay (synchro tempo), Reverb, Stereo/Gain.
+- Correctif : les anciens envois etaient a 0 par defaut -> reverb / delay inaudibles. Remplaces par les groupes.
+- Correctif : changer le Rate de l'arp / seq est pris en compte immediatement.
+- Couches : nom modifiable (double-clic), barre de volume, sortie affichee. Zone / Sends / Macros retiree.
+- Valeurs affichees sans zeros inutiles (0.9, 0.09, 350 ms...).
 
 ## Nouveau en v0.9
 - Page LIB : categories (All, Favorites, Bass, Lead, Pad...), recherche (nom, tags, auteur), liste,

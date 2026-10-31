@@ -123,7 +123,7 @@ public:
     void prepare (double sr)
     {
         fs = float (sr);
-        const int size = nextPow2 (int (2.2 * sr));
+        const int size = nextPow2 (int (4.5 * sr));      // jusqu'a 1 mesure a 60 BPM
         mask = size - 1;
         bl.assign ((size_t) size, 0.f);
         br.assign ((size_t) size, 0.f);

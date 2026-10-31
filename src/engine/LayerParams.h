@@ -9,7 +9,7 @@ constexpr int kLayers = 4;      // modifiable (ex: 6) : tout le reste s'adapte
 enum LP
 {
     LP_Enable, LP_Level, LP_Pan, LP_Transpose, LP_KeyLo, LP_KeyHi, LP_VelLo, LP_VelHi,
-    LP_SendCho, LP_SendDly, LP_SendRev, LP_Arp,
+    LP_Output, LP_Arp,
     LP_Source, LP_OneShot, LP_Wave, LP_Unison, LP_Detune, LP_WtPos,
     LP_FmAlgo, LP_FmR1, LP_FmR2, LP_FmIdx, LP_FmFb,
     LP_Cutoff, LP_Res, LP_Atk, LP_Dec, LP_Sus, LP_Rel, LP_MAtk, LP_MDec, LP_MSus, LP_MRel,
@@ -43,9 +43,7 @@ inline const LPSpec kLpSpecs[] = {
     { "keyhi",   "Key High",      Kind::Int,    0, 127, 1, 127, "" },
     { "vello",   "Vel Low",       Kind::Int,    1, 127, 1, 1, "" },
     { "velhi",   "Vel High",      Kind::Int,    1, 127, 1, 127, "" },
-    { "sendcho", "Chorus Send",   Kind::Float,  0, 1, 1, 0, "" },
-    { "senddly", "Delay Send",    Kind::Float,  0, 1, 1, 0, "" },
-    { "sendrev", "Reverb Send",   Kind::Float,  0, 1, 1, 0, "" },
+    { "output",  "Output",        Kind::Choice, 0, 0, 1, 0, "Master|FX 1|FX 2|FX 3|FX 4" },
     { "arp",     "Arp On",        Kind::Bool,   0, 1, 1, 0, "" },
     { "source",  "Source",        Kind::Choice, 0, 0, 1, 0, "Synth|Sample|Synth+Sample" },
     { "oneshot", "One-shot",      Kind::Bool,   0, 1, 1, 0, "" },
